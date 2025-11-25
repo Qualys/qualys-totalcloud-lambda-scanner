@@ -17,6 +17,88 @@ locals {
   layer_name    = "${var.stack_name}-qscanner"
 }
 
+# KMS key for encrypting sensitive data (DynamoDB, SQS, SNS, CloudWatch Logs)
+resource "aws_kms_key" "scanner" {
+  description             = "KMS key for Qualys Lambda Scanner encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow CloudWatch Logs"
+        Effect = "Allow"
+        Principal = {
+          Service = "logs.${data.aws_region.current.name}.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt*",
+          "kms:Decrypt*",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:Describe*"
+        ]
+        Resource = "*"
+        Condition = {
+          ArnLike = {
+            "kms:EncryptionContext:aws:logs:arn" = "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"
+          }
+        }
+      },
+      {
+        Sid    = "Allow SNS"
+        Effect = "Allow"
+        Principal = {
+          Service = "sns.amazonaws.com"
+        }
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey*"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow CloudTrail"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt*",
+          "kms:Decrypt*",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:Describe*"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = merge(
+    var.tags,
+    {
+      Name      = "${var.stack_name}-kms-key"
+      ManagedBy = "Terraform"
+    }
+  )
+}
+
+resource "aws_kms_alias" "scanner" {
+  name          = "alias/${var.stack_name}-scanner"
+  target_key_id = aws_kms_key.scanner.key_id
+}
+
 # Create Lambda Layer for QScanner binary
 resource "aws_lambda_layer_version" "qscanner" {
   filename            = var.qscanner_layer_zip
@@ -74,6 +156,17 @@ resource "aws_dynamodb_table" "scan_cache" {
   ttl {
     attribute_name = "ttl"
     enabled        = true
+  }
+
+  # Enable server-side encryption with KMS CMK
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.scanner.arn
+  }
+
+  # Enable point-in-time recovery for enterprise compliance
+  point_in_time_recovery {
+    enabled = true
   }
 
   tags = merge(
@@ -152,12 +245,52 @@ resource "aws_s3_bucket_lifecycle_configuration" "scan_results" {
   }
 }
 
+# Bucket policy to enforce HTTPS transport for scan results
+resource "aws_s3_bucket_policy" "scan_results" {
+  count  = var.enable_s3_results ? 1 : 0
+  bucket = aws_s3_bucket.scan_results[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "DenyUnencryptedTransport"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource = [
+          aws_s3_bucket.scan_results[0].arn,
+          "${aws_s3_bucket.scan_results[0].arn}/*"
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
+      },
+      {
+        Sid       = "DenyIncorrectEncryptionHeader"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:PutObject"
+        Resource  = "${aws_s3_bucket.scan_results[0].arn}/*"
+        Condition = {
+          StringNotEquals = {
+            "s3:x-amz-server-side-encryption" = "AES256"
+          }
+        }
+      }
+    ]
+  })
+}
+
 # SNS topic for scan notifications
 resource "aws_sns_topic" "scan_notifications" {
   count = var.enable_sns_notifications ? 1 : 0
 
-  name         = "${var.stack_name}-scan-notifications"
-  display_name = "Qualys Lambda Scan Notifications"
+  name              = "${var.stack_name}-scan-notifications"
+  display_name      = "Qualys Lambda Scan Notifications"
+  kms_master_key_id = aws_kms_key.scanner.id
 
   tags = merge(
     var.tags,
@@ -172,6 +305,7 @@ resource "aws_sns_topic" "scan_notifications" {
 resource "aws_cloudwatch_log_group" "scanner_lambda" {
   name              = "/aws/lambda/${local.function_name}"
   retention_in_days = 30
+  kms_key_id        = aws_kms_key.scanner.arn
 
   tags = merge(
     var.tags,
@@ -222,6 +356,7 @@ resource "aws_iam_role_policy" "scanner_lambda" {
         Action = [
           "ecr:GetAuthorizationToken"
         ]
+        # Note: ecr:GetAuthorizationToken requires Resource: "*" per AWS documentation
         Resource = "*"
       },
       {
@@ -240,10 +375,23 @@ resource "aws_iam_role_policy" "scanner_lambda" {
         Effect = "Allow"
         Action = [
           "lambda:GetFunction",
-          "lambda:GetFunctionConfiguration",
+          "lambda:GetFunctionConfiguration"
+        ]
+        Resource = "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:*"
+      },
+      {
+        # Separate statement for TagResource to potentially restrict in future
+        Sid    = "LambdaTag"
+        Effect = "Allow"
+        Action = [
           "lambda:TagResource"
         ]
         Resource = "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:*"
+        Condition = {
+          "ForAllValues:StringLike" = {
+            "aws:TagKeys" = ["QualysScan*"]
+          }
+        }
       },
       {
         Sid    = "SecretsManagerRead"
@@ -266,6 +414,33 @@ resource "aws_iam_role_policy" "scanner_lambda" {
         Effect = "Allow"
         Action = [
           "cloudwatch:PutMetricData"
+        ]
+        # Note: cloudwatch:PutMetricData requires Resource: "*" per AWS documentation
+        # but we restrict to our namespace via condition key
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "cloudwatch:namespace" = "QualysLambdaScanner"
+          }
+        }
+      },
+      {
+        # KMS permissions for encrypting/decrypting data
+        Sid    = "KMSAccess"
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey"
+        ]
+        Resource = aws_kms_key.scanner.arn
+      },
+      {
+        # X-Ray tracing permissions
+        Sid    = "XRayTracing"
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords"
         ]
         Resource = "*"
       }
@@ -311,6 +486,13 @@ resource "aws_sqs_queue" "scanner_dlq" {
   name                      = "${var.stack_name}-scanner-dlq"
   message_retention_seconds = 1209600 # 14 days
 
+  # Enable KMS encryption for messages at rest
+  kms_master_key_id                 = aws_kms_key.scanner.id
+  kms_data_key_reuse_period_seconds = 300
+
+  # Enable server-side encryption
+  sqs_managed_sse_enabled = false # Using KMS instead
+
   tags = merge(
     var.tags,
     {
@@ -331,6 +513,10 @@ resource "aws_lambda_function" "scanner" {
   memory_size      = var.scanner_memory_size
   timeout          = var.scanner_timeout
 
+  # Reserved concurrency prevents runaway invocations during mass Lambda deployments
+  # Set to 10 to prevent overwhelming the scanner while still allowing parallelism
+  reserved_concurrent_executions = var.scanner_reserved_concurrency
+
   layers = [aws_lambda_layer_version.qscanner.arn]
 
   dead_letter_config {
@@ -339,6 +525,11 @@ resource "aws_lambda_function" "scanner" {
 
   ephemeral_storage {
     size = var.scanner_ephemeral_storage
+  }
+
+  # Enable X-Ray tracing for debugging and auditing
+  tracing_config {
+    mode = "Active"
   }
 
   environment {
@@ -398,6 +589,19 @@ resource "aws_s3_bucket_public_access_block" "cloudtrail" {
   restrict_public_buckets = true
 }
 
+# Enable server-side encryption for CloudTrail bucket
+resource "aws_s3_bucket_server_side_encryption_configuration" "cloudtrail" {
+  bucket = aws_s3_bucket.cloudtrail.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      kms_master_key_id = aws_kms_key.scanner.arn
+      sse_algorithm     = "aws:kms"
+    }
+    bucket_key_enabled = true
+  }
+}
+
 resource "aws_s3_bucket_lifecycle_configuration" "cloudtrail" {
   bucket = aws_s3_bucket.cloudtrail.id
 
@@ -425,6 +629,14 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
         }
         Action   = "s3:GetBucketAcl"
         Resource = aws_s3_bucket.cloudtrail.arn
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:cloudtrail:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:trail/${var.stack_name}-trail"
+          }
+        }
       },
       {
         Sid    = "AWSCloudTrailWrite"
@@ -433,10 +645,29 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
           Service = "cloudtrail.amazonaws.com"
         }
         Action   = "s3:PutObject"
-        Resource = "${aws_s3_bucket.cloudtrail.arn}/*"
+        Resource = "${aws_s3_bucket.cloudtrail.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
         Condition = {
           StringEquals = {
-            "s3:x-amz-acl" = "bucket-owner-full-control"
+            "s3:x-amz-acl"      = "bucket-owner-full-control"
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:cloudtrail:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:trail/${var.stack_name}-trail"
+          }
+        }
+      },
+      {
+        Sid       = "DenyUnencryptedTransport"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource = [
+          aws_s3_bucket.cloudtrail.arn,
+          "${aws_s3_bucket.cloudtrail.arn}/*"
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
           }
         }
       }

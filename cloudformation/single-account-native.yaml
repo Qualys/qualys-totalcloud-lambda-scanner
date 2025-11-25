@@ -90,6 +90,13 @@ Parameters:
       - 'true'
       - 'false'
 
+  ScannerReservedConcurrency:
+    Type: Number
+    Description: 'Reserved concurrent executions for Scanner Lambda (prevents runaway invocations)'
+    Default: 10
+    MinValue: 1
+    MaxValue: 100
+
 Conditions:
   CreateS3Bucket: !Equals [!Ref EnableS3Results, 'true']
   CreateSNSTopic: !Equals [!Ref EnableSNSNotifications, 'true']
@@ -97,6 +104,67 @@ Conditions:
   CreateTrail: !Equals [!Ref CreateCloudTrail, 'true']
 
 Resources:
+  # KMS key for encrypting sensitive data (DynamoDB, SQS, SNS, CloudWatch Logs)
+  ScannerKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS key for Qualys Lambda Scanner encryption'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMUserPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+          - Sid: AllowSNS
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey*'
+            Resource: '*'
+          - Sid: AllowCloudTrail
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-kms-key'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ScannerKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-scanner'
+      TargetKeyId: !Ref ScannerKMSKey
+
   ScanResultsBucket:
     Type: AWS::S3::Bucket
     Condition: CreateS3Bucket
@@ -131,6 +199,7 @@ Resources:
     Properties:
       TopicName: !Sub '${AWS::StackName}-scan-notifications'
       DisplayName: 'Qualys Lambda Scan Notifications'
+      KmsMasterKeyId: !Ref ScannerKMSKey
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-scan-notifications'
@@ -152,6 +221,12 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref ScannerKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-scan-cache'
@@ -163,6 +238,8 @@ Resources:
     Properties:
       QueueName: !Sub '${AWS::StackName}-scanner-dlq'
       MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: !Ref ScannerKMSKey
+      KmsDataKeyReusePeriodSeconds: 300
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-scanner-dlq'
@@ -191,6 +268,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
+                # Note: ecr:GetAuthorizationToken requires Resource: "*" per AWS documentation
                 Resource: '*'
               - Sid: ECRRepositoryAccess
                 Effect: Allow
@@ -205,8 +283,16 @@ Resources:
                 Action:
                   - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+              - Sid: LambdaTag
+                Effect: Allow
+                Action:
                   - lambda:TagResource
                 Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+                Condition:
+                  'ForAllValues:StringLike':
+                    'aws:TagKeys':
+                      - 'QualysScan*'
               - Sid: SecretsManagerRead
                 Effect: Allow
                 Action:
@@ -221,6 +307,23 @@ Resources:
                 Effect: Allow
                 Action:
                   - cloudwatch:PutMetricData
+                # Note: cloudwatch:PutMetricData requires Resource: "*" per AWS documentation
+                # but we restrict to our namespace via condition key
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': 'QualysLambdaScanner'
+              - Sid: KMSAccess
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt ScannerKMSKey.Arn
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
                 Resource: '*'
               - !If
                 - CreateScanCache
@@ -259,6 +362,7 @@ Resources:
     Properties:
       LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-scanner'
       RetentionInDays: 30
+      KmsKeyId: !GetAtt ScannerKMSKey.Arn
 
   # Package Lambda function code into S3
   LambdaCodeBucket:
@@ -283,12 +387,17 @@ Resources:
       Role: !GetAtt ScannerLambdaRole.Arn
       MemorySize: !Ref ScannerMemorySize
       Timeout: !Ref ScannerTimeout
+      # Reserved concurrency prevents runaway invocations during mass Lambda deployments
+      ReservedConcurrentExecutions: !Ref ScannerReservedConcurrency
       EphemeralStorage:
         Size: !Ref ScannerEphemeralStorage
       Layers:
         - !Ref QScannerLayerArn
       DeadLetterConfig:
         TargetArn: !GetAtt ScannerDeadLetterQueue.Arn
+      # Enable X-Ray tracing for debugging and auditing
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           QUALYS_SECRET_ARN: !Ref QualysSecretArn
@@ -400,12 +509,19 @@ Resources:
     Properties:
       LogGroupName: !Sub '/aws/cloudtrail/${AWS::StackName}'
       RetentionInDays: 7
+      KmsKeyId: !GetAtt ScannerKMSKey.Arn
 
   CloudTrailBucket:
     Type: AWS::S3::Bucket
     Condition: CreateTrail
     Properties:
       BucketName: !Sub '${AWS::StackName}-cloudtrail-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref ScannerKMSKey
+            BucketKeyEnabled: true
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -433,15 +549,33 @@ Resources:
               Service: cloudtrail.amazonaws.com
             Action: s3:GetBucketAcl
             Resource: !GetAtt CloudTrailBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-trail'
           - Sid: AWSCloudTrailWrite
             Effect: Allow
             Principal:
               Service: cloudtrail.amazonaws.com
             Action: s3:PutObject
-            Resource: !Sub '${CloudTrailBucket.Arn}/*'
+            Resource: !Sub '${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
             Condition:
               StringEquals:
-                s3:x-amz-acl: bucket-owner-full-control
+                's3:x-amz-acl': bucket-owner-full-control
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-trail'
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt CloudTrailBucket.Arn
+              - !Sub '${CloudTrailBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
 
   CloudTrail:
     Type: AWS::CloudTrail::Trail
@@ -608,3 +742,9 @@ Outputs:
     Value: !Ref ScanCacheTable
     Export:
       Name: !Sub '${AWS::StackName}-ScanCacheTable'
+
+  KMSKeyArn:
+    Description: 'ARN of the KMS key used for encryption'
+    Value: !GetAtt ScannerKMSKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-KMSKeyArn'
