@@ -123,29 +123,11 @@ Deploy a single scanner in a security account (hub) that scans Lambda functions 
 
 ## Prerequisites
 
-- AWS CLI v2 configured with appropriate permissions
+- AWS CLI v2 configured with administrative permissions (or permissions to create CloudFormation stacks, Lambda, S3, DynamoDB, SNS, SQS, KMS, IAM roles, EventBridge, and Secrets Manager resources)
 - Qualys subscription with API access
 - Qualys access token
 - For StackSet deployments: AWS Organizations with service-managed permissions enabled
 - For centralized deployments: Cross-account IAM role trust relationships
-
-Required IAM permissions for deployment:
-
-```
-cloudformation:*
-lambda:*
-s3:*
-dynamodb:*
-sns:*
-sqs:*
-kms:*
-secretsmanager:*
-events:*
-iam:*
-logs:*
-sts:GetCallerIdentity
-organizations:DescribeOrganization (for StackSet deployments)
-```
 
 ## Single Account Deployment
 
