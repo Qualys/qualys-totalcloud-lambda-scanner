@@ -249,7 +249,8 @@ def get_lambda_details(function_arn: str, cross_account_role: Optional[str] = No
         assumed_role = sts_client.assume_role(
             RoleArn=cross_account_role,
             RoleSessionName='QScannerSession',
-            DurationSeconds=900  # Minimum duration for security
+            DurationSeconds=900,  # Minimum duration for security
+            ExternalId='qualys-lambda-scanner'  # Required by spoke role for confused deputy protection
         )
 
         lambda_client_temp = boto3.client(
