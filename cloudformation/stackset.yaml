@@ -36,40 +36,31 @@ Parameters:
     Description: 'Create S3 bucket for storing scan results'
     Default: 'true'
     AllowedValues:
-      - US1
-      - US2
-      - US3
-      - US4
-      - GOV1
-      - EU1
-      - EU2
-      - EU3
-      - IN1
-      - CA1
-      - AE1
-      - UK1
-      - AU1
-      - KSA1
+      - 'true'
+      - 'false'
 
   EnableSNSNotifications:
     Type: String
     Description: 'Create SNS topic for scan notifications'
     Default: 'true'
     AllowedValues:
-      - US1
-      - US2
-      - US3
-      - US4
-      - GOV1
-      - EU1
-      - EU2
-      - EU3
-      - IN1
-      - CA1
-      - AE1
-      - UK1
-      - AU1
-      - KSA1
+      - 'true'
+      - 'false'
+
+  EnableScanCache:
+    Type: String
+    Description: 'Enable DynamoDB scan cache to prevent duplicate scans'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  CacheTTLDays:
+    Type: Number
+    Description: 'Number of days to cache scan results'
+    Default: 30
+    MinValue: 1
+    MaxValue: 365
 
   ScannerMemorySize:
     Type: Number
@@ -92,11 +83,69 @@ Parameters:
     MinValue: 512
     MaxValue: 10240
 
+  ScannerReservedConcurrency:
+    Type: Number
+    Description: 'Reserved concurrent executions for Scanner Lambda (prevents runaway invocations)'
+    Default: 10
+    MinValue: 1
+    MaxValue: 100
+
 Conditions:
   CreateS3Bucket: !Equals [!Ref EnableS3Results, 'true']
   CreateSNSTopic: !Equals [!Ref EnableSNSNotifications, 'true']
+  CreateScanCache: !Equals [!Ref EnableScanCache, 'true']
 
 Resources:
+  # KMS key for encrypting sensitive data (DynamoDB, SQS, SNS, CloudWatch Logs)
+  ScannerKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS key for Qualys Lambda Scanner encryption'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMUserPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+          - Sid: AllowSNS
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey*'
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: 'qualys-lambda-scanner-kms-key'
+        - Key: ManagedBy
+          Value: CloudFormation-StackSet
+
+  ScannerKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: 'alias/qualys-lambda-scanner'
+      TargetKeyId: !Ref ScannerKMSKey
+
   # Secrets Manager Secret for Qualys Credentials
   QualysCredentialsSecret:
     Type: AWS::SecretsManager::Secret
@@ -150,9 +199,52 @@ Resources:
     Properties:
       TopicName: 'qualys-lambda-scan-notifications'
       DisplayName: 'Qualys Lambda Scan Notifications'
+      KmsMasterKeyId: !Ref ScannerKMSKey
       Tags:
         - Key: Name
           Value: 'qualys-lambda-scan-notifications'
+        - Key: ManagedBy
+          Value: CloudFormation-StackSet
+
+  # DynamoDB table for scan caching
+  ScanCacheTable:
+    Type: AWS::DynamoDB::Table
+    Condition: CreateScanCache
+    Properties:
+      TableName: 'qualys-lambda-scanner-cache'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: function_arn
+          AttributeType: S
+      KeySchema:
+        - AttributeName: function_arn
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref ScannerKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Name
+          Value: 'qualys-lambda-scanner-cache'
+        - Key: ManagedBy
+          Value: CloudFormation-StackSet
+
+  # Dead Letter Queue for Scanner Lambda
+  ScannerDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: 'qualys-lambda-scanner-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: !Ref ScannerKMSKey
+      KmsDataKeyReusePeriodSeconds: 300
+      Tags:
+        - Key: Name
+          Value: 'qualys-lambda-scanner-dlq'
         - Key: ManagedBy
           Value: CloudFormation-StackSet
 
@@ -175,32 +267,93 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # ECR Permissions
-              - Sid: ECRAccess
+              # ECR Auth Token - requires Resource: "*" per AWS documentation
+              - Sid: ECRAuthToken
                 Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
+                Resource: '*'
+
+              # ECR Repository Access - scoped to account
+              - Sid: ECRRepositoryAccess
+                Effect: Allow
+                Action:
                   - ecr:BatchCheckLayerAvailability
                   - ecr:GetDownloadUrlForLayer
                   - ecr:BatchGetImage
                   - ecr:DescribeImages
-                Resource: '*'
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*'
 
-              # Lambda Read Permissions
+              # Lambda Read Permissions - scoped to account
               - Sid: LambdaRead
                 Effect: Allow
                 Action:
                   - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+
+              # Lambda Tag with restriction to QualysScan* tags only
+              - Sid: LambdaTag
+                Effect: Allow
+                Action:
                   - lambda:TagResource
                 Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+                Condition:
+                  'ForAllValues:StringLike':
+                    'aws:TagKeys':
+                      - 'QualysScan*'
 
               # Secrets Manager Permissions
               - Sid: SecretsManagerRead
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !GetAtt QualysCredentialsSecret.Id
+                Resource: !Ref QualysCredentialsSecret
+
+              # SQS Dead Letter Queue
+              - Sid: SQSDeadLetterQueue
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt ScannerDeadLetterQueue.Arn
+
+              # CloudWatch Metrics - requires Resource: "*" but restricted by namespace condition
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': 'QualysLambdaScanner'
+
+              # KMS Access for encryption/decryption
+              - Sid: KMSAccess
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt ScannerKMSKey.Arn
+
+              # X-Ray Tracing permissions
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+
+              # DynamoDB Access (if enabled)
+              - !If
+                - CreateScanCache
+                - Sid: DynamoDBAccess
+                  Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:PutItem
+                    - dynamodb:UpdateItem
+                  Resource: !GetAtt ScanCacheTable.Arn
+                - !Ref AWS::NoValue
 
               # S3 Permissions (if enabled)
               - !If
@@ -209,7 +362,6 @@ Resources:
                   Effect: Allow
                   Action:
                     - s3:PutObject
-                    - s3:PutObjectAcl
                   Resource: !Sub '${ScanResultsBucket.Arn}/*'
                 - !Ref AWS::NoValue
 
@@ -235,6 +387,7 @@ Resources:
     Properties:
       LogGroupName: '/aws/lambda/qualys-lambda-scanner'
       RetentionInDays: 30
+      KmsKeyId: !GetAtt ScannerKMSKey.Arn
 
   # Scanner Lambda Function
   ScannerLambdaFunction:
@@ -248,14 +401,23 @@ Resources:
       Role: !GetAtt ScannerLambdaRole.Arn
       MemorySize: !Ref ScannerMemorySize
       Timeout: !Ref ScannerTimeout
+      # Reserved concurrency prevents runaway invocations during mass Lambda deployments
+      ReservedConcurrentExecutions: !Ref ScannerReservedConcurrency
       EphemeralStorage:
         Size: !Ref ScannerEphemeralStorage
+      DeadLetterConfig:
+        TargetArn: !GetAtt ScannerDeadLetterQueue.Arn
+      # Enable X-Ray tracing for debugging and auditing
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           QUALYS_SECRET_ARN: !Ref QualysCredentialsSecret
           RESULTS_S3_BUCKET: !If [CreateS3Bucket, !Ref ScanResultsBucket, '']
           SNS_TOPIC_ARN: !If [CreateSNSTopic, !Ref ScanNotificationsTopic, '']
+          SCAN_CACHE_TABLE: !If [CreateScanCache, !Ref ScanCacheTable, '']
           SCAN_TIMEOUT: '300'
+          CACHE_TTL_DAYS: !Ref CacheTTLDays
       Tags:
         - Key: Name
           Value: 'qualys-lambda-scanner'
@@ -352,6 +514,89 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt LambdaUpdateConfigEventRule.Arn
 
+  # CloudWatch Alarms for monitoring scanner health
+  ScannerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateSNSTopic
+    Properties:
+      AlarmName: 'qualys-lambda-scanner-errors'
+      AlarmDescription: 'Scanner Lambda has errors'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ScannerLambdaFunction
+      AlarmActions:
+        - !Ref ScanNotificationsTopic
+
+  ScannerThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateSNSTopic
+    Properties:
+      AlarmName: 'qualys-lambda-scanner-throttles'
+      AlarmDescription: 'Scanner Lambda is being throttled'
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ScannerLambdaFunction
+      AlarmActions:
+        - !Ref ScanNotificationsTopic
+
+  ScannerDLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateSNSTopic
+    Properties:
+      AlarmName: 'qualys-lambda-scanner-dlq-messages'
+      AlarmDescription: 'Messages in scanner DLQ - indicates failed scans'
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ScannerDeadLetterQueue.QueueName
+      AlarmActions:
+        - !Ref ScanNotificationsTopic
+
+  ScannerDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateSNSTopic
+    Properties:
+      AlarmName: 'qualys-lambda-scanner-duration'
+      AlarmDescription: 'Scanner Lambda approaching timeout threshold'
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Sub
+        - '${TimeoutMillis}'
+        - TimeoutMillis: !Join ['', [!Ref ScannerTimeout, '000']]
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ScannerLambdaFunction
+      AlarmActions:
+        - !Ref ScanNotificationsTopic
+
 Outputs:
   ScannerLambdaArn:
     Description: 'ARN of the Scanner Lambda function'
@@ -370,3 +615,12 @@ Outputs:
     Description: 'ARN of the SNS topic for scan notifications'
     Condition: CreateSNSTopic
     Value: !Ref ScanNotificationsTopic
+
+  ScanCacheTableName:
+    Description: 'Name of the DynamoDB scan cache table'
+    Condition: CreateScanCache
+    Value: !Ref ScanCacheTable
+
+  KMSKeyArn:
+    Description: 'ARN of the KMS key used for encryption'
+    Value: !GetAtt ScannerKMSKey.Arn
