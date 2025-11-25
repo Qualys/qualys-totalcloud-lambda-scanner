@@ -129,23 +129,239 @@ Deploy a single scanner in a security account (hub) that scans Lambda functions 
 - For StackSet deployments: AWS Organizations with service-managed permissions enabled
 - For centralized deployments: Cross-account IAM role trust relationships
 
-Required IAM permissions for deployment:
+### Deployment IAM Permissions
 
+The following permissions are required for the **user or CI/CD role that deploys the solution**. These are NOT the permissions granted to the Lambda functions at runtime.
+
+For initial deployment (creates all resources):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudFormationDeployment",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateStack",
+        "cloudformation:UpdateStack",
+        "cloudformation:DeleteStack",
+        "cloudformation:DescribeStacks",
+        "cloudformation:DescribeStackEvents",
+        "cloudformation:GetTemplate",
+        "cloudformation:ValidateTemplate",
+        "cloudformation:CreateChangeSet",
+        "cloudformation:DescribeChangeSet",
+        "cloudformation:ExecuteChangeSet",
+        "cloudformation:DeleteChangeSet"
+      ],
+      "Resource": "arn:aws:cloudformation:*:*:stack/qualys-*/*"
+    },
+    {
+      "Sid": "StackSetDeployment",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:CreateStackSet",
+        "cloudformation:UpdateStackSet",
+        "cloudformation:DeleteStackSet",
+        "cloudformation:DescribeStackSet",
+        "cloudformation:CreateStackInstances",
+        "cloudformation:DeleteStackInstances",
+        "cloudformation:ListStackInstances"
+      ],
+      "Resource": "arn:aws:cloudformation:*:*:stackset/qscanner-*:*"
+    },
+    {
+      "Sid": "LambdaManagement",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:CreateFunction",
+        "lambda:UpdateFunctionCode",
+        "lambda:UpdateFunctionConfiguration",
+        "lambda:DeleteFunction",
+        "lambda:GetFunction",
+        "lambda:AddPermission",
+        "lambda:RemovePermission",
+        "lambda:PublishLayerVersion",
+        "lambda:DeleteLayerVersion",
+        "lambda:GetLayerVersion"
+      ],
+      "Resource": [
+        "arn:aws:lambda:*:*:function:qualys-*",
+        "arn:aws:lambda:*:*:layer:qscanner*:*"
+      ]
+    },
+    {
+      "Sid": "S3ArtifactsBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:PutBucketPolicy",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketEncryption",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::qualys-scanner-artifacts-*",
+        "arn:aws:s3:::qualys-scanner-artifacts-*/*"
+      ]
+    },
+    {
+      "Sid": "IAMRoleManagement",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRole",
+        "iam:PassRole",
+        "iam:TagRole"
+      ],
+      "Resource": [
+        "arn:aws:iam::*:role/qualys-*",
+        "arn:aws:iam::*:role/*-scanner-*",
+        "arn:aws:iam::*:role/*-bulk-scan-*"
+      ]
+    },
+    {
+      "Sid": "KMSKeyManagement",
+      "Effect": "Allow",
+      "Action": [
+        "kms:CreateKey",
+        "kms:CreateAlias",
+        "kms:DeleteAlias",
+        "kms:DescribeKey",
+        "kms:EnableKeyRotation",
+        "kms:PutKeyPolicy",
+        "kms:ScheduleKeyDeletion",
+        "kms:TagResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "kms:RequestAlias": "alias/*qualys*"
+        }
+      }
+    },
+    {
+      "Sid": "SecretsManagerManagement",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:TagResource"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:*qualys*"
+    },
+    {
+      "Sid": "DynamoDBManagement",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:CreateTable",
+        "dynamodb:DeleteTable",
+        "dynamodb:DescribeTable",
+        "dynamodb:UpdateTimeToLive",
+        "dynamodb:UpdateContinuousBackups",
+        "dynamodb:TagResource"
+      ],
+      "Resource": "arn:aws:dynamodb:*:*:table/*qualys*"
+    },
+    {
+      "Sid": "SNSManagement",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic",
+        "sns:DeleteTopic",
+        "sns:SetTopicAttributes",
+        "sns:TagResource"
+      ],
+      "Resource": "arn:aws:sns:*:*:*qualys*"
+    },
+    {
+      "Sid": "SQSManagement",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:CreateQueue",
+        "sqs:DeleteQueue",
+        "sqs:SetQueueAttributes",
+        "sqs:GetQueueAttributes",
+        "sqs:TagQueue"
+      ],
+      "Resource": "arn:aws:sqs:*:*:*qualys*"
+    },
+    {
+      "Sid": "EventBridgeManagement",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:DeleteRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:DescribeRule",
+        "events:CreateEventBus",
+        "events:DeleteEventBus",
+        "events:PutPermission",
+        "events:RemovePermission"
+      ],
+      "Resource": [
+        "arn:aws:events:*:*:rule/*qualys*",
+        "arn:aws:events:*:*:event-bus/*qualys*"
+      ]
+    },
+    {
+      "Sid": "CloudWatchLogsManagement",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
+        "logs:PutRetentionPolicy",
+        "logs:TagLogGroup"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:*qualys*"
+    },
+    {
+      "Sid": "AccountInfo",
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity",
+        "organizations:DescribeOrganization"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
 ```
-cloudformation:*
-lambda:*
-s3:*
-dynamodb:*
-sns:*
-sqs:*
-kms:*
-secretsmanager:*
-events:*
-iam:*
-logs:*
-sts:GetCallerIdentity
-organizations:DescribeOrganization (for StackSet deployments)
-```
+
+### Scanner Lambda Runtime Permissions
+
+The deployed Lambda functions have **least-privilege permissions** scoped to specific resources:
+
+| Permission | Scope | Purpose |
+|------------|-------|---------|
+| lambda:GetFunction | Own account functions | Read Lambda code for scanning |
+| lambda:GetFunctionConfiguration | Own account functions | Read Lambda configuration |
+| lambda:TagResource | Own account functions, QualysScan* tags only | Tag scanned functions |
+| secretsmanager:GetSecretValue | Qualys credentials secret only | Retrieve API token |
+| dynamodb:GetItem, PutItem, UpdateItem | Scan cache table only | Cache management |
+| s3:PutObject | Results bucket only | Store scan results |
+| sns:Publish | Notifications topic only | Send alerts |
+| sqs:SendMessage | DLQ only | Failed invocation handling |
+| kms:Decrypt, GenerateDataKey | Scanner KMS key only | Encryption operations |
+| cloudwatch:PutMetricData | QualysLambdaScanner namespace only | Custom metrics |
+| ecr:GetAuthorizationToken | Global (required by AWS) | ECR authentication |
+| ecr:BatchGetImage, GetDownloadUrlForLayer | Own account repositories | Scan container Lambdas |
+| sts:AssumeRole | Spoke role only (centralized mode) | Cross-account access |
+
+For cross-account scanning (centralized hub), the scanner also requires:
+- sts:AssumeRole permission to spoke accounts
+- Spoke role requires ExternalId for confused deputy protection
 
 ## Single Account Deployment
 
