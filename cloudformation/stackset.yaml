@@ -27,9 +27,19 @@ Parameters:
     Description: 'Qualys Access Token (will be stored in Secrets Manager)'
     NoEcho: true
 
-  ScannerImageUri:
+  ArtifactsBucket:
     Type: String
-    Description: 'ECR URI of the Scanner Lambda container image'
+    Description: 'S3 bucket containing Lambda code and layer artifacts (must be accessible by all org accounts)'
+
+  LambdaCodeKey:
+    Type: String
+    Description: 'S3 key for Lambda function code zip'
+    Default: 'qualys-lambda-scanner/lambda-code.zip'
+
+  LayerZipKey:
+    Type: String
+    Description: 'S3 key for QScanner Lambda layer zip'
+    Default: 'qualys-lambda-scanner/qscanner-layer.zip'
 
   EnableS3Results:
     Type: String
@@ -389,15 +399,33 @@ Resources:
       RetentionInDays: 30
       KmsKeyId: !GetAtt ScannerKMSKey.Arn
 
+  # Lambda Layer containing QScanner binary
+  QScannerLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: 'qscanner-binary'
+      Description: 'QScanner binary for Lambda vulnerability scanning'
+      Content:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Ref LayerZipKey
+      CompatibleRuntimes:
+        - python3.11
+        - python3.10
+        - python3.9
+      CompatibleArchitectures:
+        - x86_64
+
   # Scanner Lambda Function
   ScannerLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
       FunctionName: 'qualys-lambda-scanner'
       Description: 'Scans Lambda functions using Qualys QScanner'
-      PackageType: Image
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
       Code:
-        ImageUri: !Ref ScannerImageUri
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Ref LambdaCodeKey
       Role: !GetAtt ScannerLambdaRole.Arn
       MemorySize: !Ref ScannerMemorySize
       Timeout: !Ref ScannerTimeout
@@ -405,6 +433,8 @@ Resources:
       ReservedConcurrentExecutions: !Ref ScannerReservedConcurrency
       EphemeralStorage:
         Size: !Ref ScannerEphemeralStorage
+      Layers:
+        - !Ref QScannerLayer
       DeadLetterConfig:
         TargetArn: !GetAtt ScannerDeadLetterQueue.Arn
       # Enable X-Ray tracing for debugging and auditing
@@ -418,6 +448,7 @@ Resources:
           SCAN_CACHE_TABLE: !If [CreateScanCache, !Ref ScanCacheTable, '']
           SCAN_TIMEOUT: '300'
           CACHE_TTL_DAYS: !Ref CacheTTLDays
+          QSCANNER_PATH: '/opt/bin/qscanner'
       Tags:
         - Key: Name
           Value: 'qualys-lambda-scanner'
@@ -601,6 +632,10 @@ Outputs:
   ScannerLambdaArn:
     Description: 'ARN of the Scanner Lambda function'
     Value: !GetAtt ScannerLambdaFunction.Arn
+
+  QScannerLayerArn:
+    Description: 'ARN of the QScanner Lambda Layer'
+    Value: !Ref QScannerLayer
 
   QualysSecretArn:
     Description: 'ARN of the Qualys credentials secret'
