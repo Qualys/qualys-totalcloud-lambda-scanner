@@ -37,28 +37,41 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Lambda Read Permissions
+              # Lambda Read Permissions - scoped to account
               - Sid: LambdaRead
                 Effect: Allow
                 Action:
                   - lambda:GetFunction
                   - lambda:GetFunctionConfiguration
-                  - lambda:ListFunctions
-                  - lambda:ListTags
-                  - lambda:TagResource
-                Resource: '*'
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
 
-              # ECR Permissions (for container-based Lambdas)
-              - Sid: ECRAccess
+              # Lambda Tag Permission with tag key restriction
+              - Sid: LambdaTag
+                Effect: Allow
+                Action:
+                  - lambda:TagResource
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+                Condition:
+                  'ForAllValues:StringLike':
+                    'aws:TagKeys':
+                      - 'QualysScan*'
+
+              # ECR Auth Token - requires Resource: "*" per AWS documentation
+              - Sid: ECRAuthToken
                 Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
+                Resource: '*'
+
+              # ECR Repository Access - scoped to account
+              - Sid: ECRRepositoryAccess
+                Effect: Allow
+                Action:
                   - ecr:BatchCheckLayerAvailability
                   - ecr:GetDownloadUrlForLayer
                   - ecr:BatchGetImage
                   - ecr:DescribeImages
-                  - ecr:DescribeRepositories
-                Resource: '*'
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*'
 
       Tags:
         - Key: Name
@@ -159,17 +172,71 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
+  # KMS key for encrypting sensitive data in spoke account
+  SpokeKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS key for Qualys Lambda Scanner spoke encryption'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMUserPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+          - Sid: AllowCloudTrail
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: 'qualys-lambda-scanner-spoke-kms'
+        - Key: ManagedBy
+          Value: CloudFormation
+
   # CloudTrail for EventBridge (if not already enabled)
   CloudTrailLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: '/aws/cloudtrail/qualys-lambda-scanner'
       RetentionInDays: 7
+      KmsKeyId: !GetAtt SpokeKMSKey.Arn
 
   CloudTrailBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub 'qualys-lambda-scanner-trail-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref SpokeKMSKey
+            BucketKeyEnabled: true
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -196,15 +263,33 @@ Resources:
               Service: cloudtrail.amazonaws.com
             Action: s3:GetBucketAcl
             Resource: !GetAtt CloudTrailBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/qualys-lambda-scanner-trail'
           - Sid: AWSCloudTrailWrite
             Effect: Allow
             Principal:
               Service: cloudtrail.amazonaws.com
             Action: s3:PutObject
-            Resource: !Sub '${CloudTrailBucket.Arn}/*'
+            Resource: !Sub '${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
             Condition:
               StringEquals:
-                s3:x-amz-acl: bucket-owner-full-control
+                's3:x-amz-acl': bucket-owner-full-control
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/qualys-lambda-scanner-trail'
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt CloudTrailBucket.Arn
+              - !Sub '${CloudTrailBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
 
   CloudTrail:
     Type: AWS::CloudTrail::Trail
@@ -216,16 +301,25 @@ Resources:
       IsMultiRegionTrail: false
       IncludeGlobalServiceEvents: true
       EnableLogFileValidation: true
-      CloudWatchLogsLogGroupArn: !GetAtt CloudTrailLogGroup.Arn
+      KMSKeyId: !Ref SpokeKMSKey
+      CloudWatchLogsLogGroupArn: !Sub '${CloudTrailLogGroup.Arn}:*'
       CloudWatchLogsRoleArn: !GetAtt CloudTrailLogsRole.Arn
-      EventSelectors:
-        - ReadWriteType: WriteOnly
-          IncludeManagementEvents: true
-          DataResources: []
+      # Use advanced event selectors to only log Lambda management events
+      # This reduces CloudTrail costs by avoiding ALL management events from all services
+      AdvancedEventSelectors:
+        - Name: 'LambdaManagementEvents'
+          FieldSelectors:
+            - Field: 'eventCategory'
+              Equals:
+                - 'Management'
+            - Field: 'resources.type'
+              Equals:
+                - 'AWS::Lambda::Function'
 
   CloudTrailLogsRole:
     Type: AWS::IAM::Role
     Properties:
+      RoleName: 'qualys-lambda-scanner-cloudtrail-logs-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -242,7 +336,12 @@ Resources:
                 Action:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !GetAtt CloudTrailLogGroup.Arn
+                Resource: !Sub '${CloudTrailLogGroup.Arn}:*'
+      Tags:
+        - Key: Name
+          Value: 'qualys-lambda-scanner-cloudtrail-logs-role'
+        - Key: ManagedBy
+          Value: CloudFormation
 
 Outputs:
   SpokeRoleArn:
@@ -262,3 +361,9 @@ Outputs:
     Value: !Ref CloudTrail
     Export:
       Name: 'QualysScannerCloudTrail'
+
+  KMSKeyArn:
+    Description: 'ARN of the KMS key used for encryption'
+    Value: !GetAtt SpokeKMSKey.Arn
+    Export:
+      Name: 'QualysScannerSpokeKMSKey'

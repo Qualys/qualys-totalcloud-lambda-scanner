@@ -588,7 +588,7 @@ Resources:
       IsMultiRegionTrail: false
       IncludeGlobalServiceEvents: true
       EnableLogFileValidation: true
-      CloudWatchLogsLogGroupArn: !GetAtt CloudTrailLogGroup.Arn
+      CloudWatchLogsLogGroupArn: !Sub '${CloudTrailLogGroup.Arn}:*'
       CloudWatchLogsRoleArn: !GetAtt CloudTrailLogsRole.Arn
       # Use AdvancedEventSelectors to only log Lambda management events
       # This reduces CloudTrail costs by avoiding ALL management events from all services
@@ -607,6 +607,7 @@ Resources:
     Type: AWS::IAM::Role
     Condition: CreateTrail
     Properties:
+      RoleName: !Sub '${AWS::StackName}-cloudtrail-logs-role'
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -623,7 +624,12 @@ Resources:
                 Action:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !GetAtt CloudTrailLogGroup.Arn
+                Resource: !Sub '${CloudTrailLogGroup.Arn}:*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-cloudtrail-logs-role'
+        - Key: ManagedBy
+          Value: CloudFormation
 
   # CloudWatch Alarms for monitoring scanner health
   ScannerErrorsAlarm:
