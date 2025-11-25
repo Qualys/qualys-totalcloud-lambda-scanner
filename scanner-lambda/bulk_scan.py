@@ -4,16 +4,21 @@ Bulk Scan Lambda - Scans all existing Lambda functions in an account.
 This function is triggered manually or on a schedule to scan existing functions
 that weren't caught by the event-driven scanner (CreateFunction/UpdateFunction events).
 
+Architecture:
+- Directly invokes the scanner Lambda asynchronously for each function
+- Uses the existing DynamoDB cache to skip already-scanned functions
+- No additional SQS queue needed - keeps costs minimal
+
 Usage:
 - Invoke manually to scan all functions in an account
-- Schedule via EventBridge for periodic full scans
+- Schedule via EventBridge for periodic full scans (e.g., weekly)
 - Pass account_ids list to scan across multiple accounts (centralized mode)
 
 Environment Variables:
-- SCANNER_QUEUE_URL: SQS queue URL to send scan requests
+- SCANNER_FUNCTION_NAME: Name of the scanner Lambda to invoke
 - CROSS_ACCOUNT_ROLE_NAME: Role name to assume in spoke accounts (optional)
-- SCAN_BATCH_SIZE: Number of functions to queue per batch (default: 100)
 - EXCLUDE_PATTERNS: Comma-separated function name patterns to exclude
+- INVOCATION_DELAY_MS: Delay between invocations to avoid throttling (default: 100)
 """
 
 import boto3
@@ -21,6 +26,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger()
@@ -28,18 +34,16 @@ logger.setLevel(logging.INFO)
 
 # Clients
 lambda_client = boto3.client('lambda')
-sqs_client = boto3.client('sqs')
 sts_client = boto3.client('sts')
 
 # Environment variables
-SCANNER_QUEUE_URL = os.environ.get('SCANNER_QUEUE_URL', '')
+SCANNER_FUNCTION_NAME = os.environ.get('SCANNER_FUNCTION_NAME', '')
 CROSS_ACCOUNT_ROLE_NAME = os.environ.get('CROSS_ACCOUNT_ROLE_NAME', '')
-SCAN_BATCH_SIZE = int(os.environ.get('SCAN_BATCH_SIZE', '100'))
-EXCLUDE_PATTERNS = os.environ.get('EXCLUDE_PATTERNS', 'qualys-lambda-scanner').split(',')
+EXCLUDE_PATTERNS = os.environ.get('EXCLUDE_PATTERNS', 'qualys-lambda-scanner,bulk-scan').split(',')
+INVOCATION_DELAY_MS = int(os.environ.get('INVOCATION_DELAY_MS', '100'))
 
 # Validation patterns
 ACCOUNT_ID_PATTERN = re.compile(r'^\d{12}$')
-FUNCTION_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]{1,64}$')
 
 
 def validate_account_id(account_id: str) -> bool:
@@ -96,7 +100,7 @@ def list_all_functions(client: boto3.client) -> List[Dict[str, Any]]:
 
             # Skip excluded functions
             if should_exclude(function_name):
-                logger.info(f"Excluding function: {function_name}")
+                logger.debug(f"Excluding function: {function_name}")
                 continue
 
             functions.append({
@@ -110,77 +114,45 @@ def list_all_functions(client: boto3.client) -> List[Dict[str, Any]]:
     return functions
 
 
-def queue_scan_requests(functions: List[Dict[str, Any]], source_account: str) -> Dict[str, int]:
-    """Queue scan requests to SQS in batches."""
-    if not SCANNER_QUEUE_URL:
-        logger.error("SCANNER_QUEUE_URL not configured")
-        return {'queued': 0, 'failed': 0}
+def invoke_scanner(func: Dict[str, Any], source_account: str) -> bool:
+    """Invoke scanner Lambda asynchronously for a single function."""
+    if not SCANNER_FUNCTION_NAME:
+        logger.error("SCANNER_FUNCTION_NAME not configured")
+        return False
 
-    queued = 0
-    failed = 0
-
-    # Process in batches of 10 (SQS batch limit)
-    for i in range(0, len(functions), 10):
-        batch = functions[i:i+10]
-        entries = []
-
-        for idx, func in enumerate(batch):
-            # Create a synthetic CloudTrail-like event for the scanner
-            scan_event = {
-                'source': 'qualys.bulk-scan',
-                'detail-type': 'Bulk Scan Request',
-                'detail': {
-                    'eventName': 'BulkScanRequest',
-                    'eventSource': 'lambda.amazonaws.com',
-                    'requestParameters': {
-                        'functionName': func['FunctionArn']
-                    },
-                    'responseElements': {
-                        'functionArn': func['FunctionArn'],
-                        'functionName': func['FunctionName'],
-                        'codeSha256': func['CodeSha256'],
-                        'runtime': func['Runtime'],
-                        'packageType': func['PackageType']
-                    },
-                    'sourceAccount': source_account
-                }
+    # Create a synthetic CloudTrail-like event for the scanner
+    scan_event = {
+        'source': 'qualys.bulk-scan',
+        'detail-type': 'Bulk Scan Request',
+        'detail': {
+            'eventName': 'BulkScanRequest',
+            'eventSource': 'lambda.amazonaws.com',
+            'requestParameters': {
+                'functionName': func['FunctionArn']
+            },
+            'responseElements': {
+                'functionArn': func['FunctionArn'],
+                'functionName': func['FunctionName'],
+                'codeSha256': func['CodeSha256'],
+                'runtime': func['Runtime'],
+                'packageType': func['PackageType']
+            },
+            'userIdentity': {
+                'accountId': source_account
             }
+        }
+    }
 
-            entries.append({
-                'Id': str(idx),
-                'MessageBody': json.dumps(scan_event),
-                'MessageGroupId': 'bulk-scan',  # For FIFO queues
-                'MessageDeduplicationId': f"{func['FunctionArn']}-{func['CodeSha256']}"
-            })
-
-        try:
-            # Try FIFO queue first, fall back to standard
-            try:
-                response = sqs_client.send_message_batch(
-                    QueueUrl=SCANNER_QUEUE_URL,
-                    Entries=entries
-                )
-            except sqs_client.exceptions.InvalidParameterValue:
-                # Standard queue - remove FIFO-specific params
-                for entry in entries:
-                    entry.pop('MessageGroupId', None)
-                    entry.pop('MessageDeduplicationId', None)
-                response = sqs_client.send_message_batch(
-                    QueueUrl=SCANNER_QUEUE_URL,
-                    Entries=entries
-                )
-
-            queued += len(response.get('Successful', []))
-            failed += len(response.get('Failed', []))
-
-            for failure in response.get('Failed', []):
-                logger.error(f"Failed to queue: {failure}")
-
-        except Exception as e:
-            logger.error(f"Batch send failed: {e}")
-            failed += len(batch)
-
-    return {'queued': queued, 'failed': failed}
+    try:
+        lambda_client.invoke(
+            FunctionName=SCANNER_FUNCTION_NAME,
+            InvocationType='Event',  # Async invocation
+            Payload=json.dumps(scan_event)
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to invoke scanner for {func['FunctionName']}: {e}")
+        return False
 
 
 def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
@@ -190,11 +162,18 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
     Event format:
     {
         "account_ids": ["123456789012", "234567890123"],  # Optional: cross-account
-        "dry_run": false,  # Optional: just count, don't queue
+        "dry_run": false,  # Optional: just count, don't invoke scanner
         "exclude_patterns": ["test-", "dev-"]  # Optional: additional excludes
     }
     """
     logger.info(f"Bulk scan triggered with event: {json.dumps(event)}")
+
+    # Validate scanner function is configured
+    if not SCANNER_FUNCTION_NAME:
+        return {
+            'statusCode': 500,
+            'body': {'error': 'SCANNER_FUNCTION_NAME not configured'}
+        }
 
     # Parse event
     account_ids = event.get('account_ids', [])
@@ -209,7 +188,7 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
         'accounts_processed': 0,
         'accounts_failed': 0,
         'total_functions': 0,
-        'queued': 0,
+        'invoked': 0,
         'failed': 0,
         'excluded': 0,
         'details': []
@@ -233,12 +212,12 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
         logger.info(f"Processing account: {account_id}")
 
         try:
-            # Get appropriate Lambda client
+            # Get appropriate Lambda client for listing
             if account_id == current_account:
-                client = lambda_client
+                list_client = lambda_client
             else:
-                client = get_lambda_client_for_account(account_id)
-                if not client:
+                list_client = get_lambda_client_for_account(account_id)
+                if not list_client:
                     results['accounts_failed'] += 1
                     results['details'].append({
                         'account': account_id,
@@ -248,7 +227,7 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
                     continue
 
             # List all functions
-            functions = list_all_functions(client)
+            functions = list_all_functions(list_client)
             function_count = len(functions)
             results['total_functions'] += function_count
 
@@ -261,17 +240,29 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
                     'functions': function_count
                 })
             else:
-                # Queue scan requests
-                queue_result = queue_scan_requests(functions, account_id)
-                results['queued'] += queue_result['queued']
-                results['failed'] += queue_result['failed']
+                # Invoke scanner for each function
+                invoked = 0
+                failed = 0
+
+                for func in functions:
+                    if invoke_scanner(func, account_id):
+                        invoked += 1
+                    else:
+                        failed += 1
+
+                    # Small delay to avoid throttling
+                    if INVOCATION_DELAY_MS > 0:
+                        time.sleep(INVOCATION_DELAY_MS / 1000.0)
+
+                results['invoked'] += invoked
+                results['failed'] += failed
 
                 results['details'].append({
                     'account': account_id,
                     'status': 'success',
                     'functions': function_count,
-                    'queued': queue_result['queued'],
-                    'failed': queue_result['failed']
+                    'invoked': invoked,
+                    'failed': failed
                 })
 
             results['accounts_processed'] += 1

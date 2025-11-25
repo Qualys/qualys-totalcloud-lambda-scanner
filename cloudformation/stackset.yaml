@@ -100,10 +100,32 @@ Parameters:
     MinValue: 1
     MaxValue: 100
 
+  EnableBulkScan:
+    Type: String
+    Description: 'Enable bulk scan Lambda to scan existing functions'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  BulkScanSchedule:
+    Type: String
+    Description: 'Cron schedule for periodic bulk scans (empty = manual only). Example: cron(0 2 ? * SUN *) for weekly Sunday 2am'
+    Default: ''
+
+  BulkScanCodeKey:
+    Type: String
+    Description: 'S3 key for bulk scan Lambda code zip'
+    Default: 'qualys-lambda-scanner/bulk-scan.zip'
+
 Conditions:
   CreateS3Bucket: !Equals [!Ref EnableS3Results, 'true']
   CreateSNSTopic: !Equals [!Ref EnableSNSNotifications, 'true']
   CreateScanCache: !Equals [!Ref EnableScanCache, 'true']
+  CreateBulkScan: !Equals [!Ref EnableBulkScan, 'true']
+  CreateBulkScanSchedule: !And
+    - !Condition CreateBulkScan
+    - !Not [!Equals [!Ref BulkScanSchedule, '']]
 
 Resources:
   # KMS key for encrypting sensitive data (DynamoDB, SQS, SNS, CloudWatch Logs)
@@ -545,6 +567,107 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt LambdaUpdateConfigEventRule.Arn
 
+  # =============================================================================
+  # Bulk Scan Lambda (Optional) - Scans existing functions
+  # =============================================================================
+
+  # IAM Role for Bulk Scan Lambda
+  BulkScanLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: CreateBulkScan
+    Properties:
+      RoleName: 'qualys-lambda-bulk-scan-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BulkScanPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # List Lambda functions in account
+              - Sid: ListLambdaFunctions
+                Effect: Allow
+                Action:
+                  - lambda:ListFunctions
+                Resource: '*'
+              # Invoke the scanner Lambda
+              - Sid: InvokeScanner
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt ScannerLambdaFunction.Arn
+      Tags:
+        - Key: Name
+          Value: 'qualys-lambda-bulk-scan-role'
+        - Key: ManagedBy
+          Value: CloudFormation-StackSet
+
+  # Bulk Scan Lambda Function
+  BulkScanLambdaFunction:
+    Type: AWS::Lambda::Function
+    Condition: CreateBulkScan
+    Properties:
+      FunctionName: 'qualys-lambda-bulk-scan'
+      Description: 'Scans all existing Lambda functions by invoking the scanner'
+      Runtime: python3.11
+      Handler: bulk_scan.lambda_handler
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Ref BulkScanCodeKey
+      Role: !GetAtt BulkScanLambdaRole.Arn
+      MemorySize: 256
+      Timeout: 900
+      Environment:
+        Variables:
+          SCANNER_FUNCTION_NAME: !Ref ScannerLambdaFunction
+          EXCLUDE_PATTERNS: 'qualys-lambda-scanner,qualys-lambda-bulk-scan'
+          INVOCATION_DELAY_MS: '100'
+      Tags:
+        - Key: Name
+          Value: 'qualys-lambda-bulk-scan'
+        - Key: ManagedBy
+          Value: CloudFormation-StackSet
+
+  # CloudWatch Log Group for Bulk Scan Lambda
+  BulkScanLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: CreateBulkScan
+    Properties:
+      LogGroupName: '/aws/lambda/qualys-lambda-bulk-scan'
+      RetentionInDays: 7
+      KmsKeyId: !GetAtt ScannerKMSKey.Arn
+
+  # EventBridge Rule for scheduled bulk scans (optional)
+  BulkScanScheduleRule:
+    Type: AWS::Events::Rule
+    Condition: CreateBulkScanSchedule
+    Properties:
+      Name: 'qualys-lambda-bulk-scan-schedule'
+      Description: 'Scheduled bulk scan of existing Lambda functions'
+      State: ENABLED
+      ScheduleExpression: !Ref BulkScanSchedule
+      Targets:
+        - Arn: !GetAtt BulkScanLambdaFunction.Arn
+          Id: BulkScanTarget
+          Input: '{}'
+
+  # Permission for EventBridge to invoke Bulk Scan Lambda
+  BulkScanSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: CreateBulkScanSchedule
+    Properties:
+      FunctionName: !Ref BulkScanLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BulkScanScheduleRule.Arn
+
   # CloudWatch Alarms for monitoring scanner health
   ScannerErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -659,3 +782,8 @@ Outputs:
   KMSKeyArn:
     Description: 'ARN of the KMS key used for encryption'
     Value: !GetAtt ScannerKMSKey.Arn
+
+  BulkScanLambdaArn:
+    Description: 'ARN of the Bulk Scan Lambda function'
+    Condition: CreateBulkScan
+    Value: !GetAtt BulkScanLambdaFunction.Arn

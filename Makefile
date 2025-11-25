@@ -71,10 +71,12 @@ layer:
 # Package Lambda function code
 package:
 	@echo "Packaging Lambda function code..."
-	@mkdir -p build/function
+	@mkdir -p build/function build/bulk-scan
 	@cp scanner-lambda/lambda_function.py build/function/
+	@cp scanner-lambda/bulk_scan.py build/bulk-scan/
 	@cd build/function && zip -r ../scanner-function.zip .
-	@echo "Function package created: build/scanner-function.zip"
+	@cd build/bulk-scan && zip -r ../bulk-scan.zip .
+	@echo "Function packages created: build/scanner-function.zip, build/bulk-scan.zip"
 
 # Publish Lambda Layer to AWS
 publish-layer: layer
@@ -209,7 +211,8 @@ upload-artifacts: layer package create-artifacts-bucket
 	@echo "Uploading artifacts to S3..."
 	@BUCKET=$$(cat build/artifacts-bucket.txt); \
 	aws s3 cp build/qscanner-layer.zip s3://$$BUCKET/qualys-lambda-scanner/qscanner-layer.zip; \
-	aws s3 cp build/scanner-function.zip s3://$$BUCKET/qualys-lambda-scanner/lambda-code.zip
+	aws s3 cp build/scanner-function.zip s3://$$BUCKET/qualys-lambda-scanner/lambda-code.zip; \
+	aws s3 cp build/bulk-scan.zip s3://$$BUCKET/qualys-lambda-scanner/bulk-scan.zip
 	@echo "Artifacts uploaded to s3://$$BUCKET/qualys-lambda-scanner/"
 
 # Deploy StackSet to organization (each account gets own scanner)
