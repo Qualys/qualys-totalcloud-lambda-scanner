@@ -91,6 +91,17 @@ variable "scanner_ephemeral_storage" {
   }
 }
 
+variable "scanner_reserved_concurrency" {
+  description = "Reserved concurrent executions for Scanner Lambda. Prevents runaway invocations during mass Lambda deployments. Set to -1 to disable (not recommended for enterprise)."
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.scanner_reserved_concurrency == -1 || (var.scanner_reserved_concurrency >= 1 && var.scanner_reserved_concurrency <= 100)
+    error_message = "Scanner reserved concurrency must be -1 (disabled) or between 1 and 100"
+  }
+}
+
 variable "tags" {
   description = "Tags to apply to all resources"
   type        = map(string)

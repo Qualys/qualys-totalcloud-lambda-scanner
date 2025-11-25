@@ -86,6 +86,19 @@ def validate_tag_value(value: str) -> bool:
     return bool(re.match(pattern, value))
 
 
+def validate_role_arn(arn: str) -> bool:
+    """Validate IAM role ARN format for cross-account role assumption
+
+    Expected format: arn:aws:iam::<account-id>:role/<role-name>
+    """
+    if not arn or not isinstance(arn, str):
+        return False
+
+    # Strict pattern for IAM role ARN
+    pattern = r'^arn:aws:iam::\d{12}:role/[a-zA-Z0-9+=,.@_-]{1,64}$'
+    return bool(re.match(pattern, arn))
+
+
 def sanitize_log_output(output: str) -> str:
     """Remove potential secrets from log output"""
     if not output:
@@ -228,10 +241,15 @@ def update_scan_cache(function_arn: str, lambda_details: Dict[str, Any], scan_re
 
 def get_lambda_details(function_arn: str, cross_account_role: Optional[str] = None) -> Dict[str, Any]:
     if cross_account_role:
+        # Validate cross-account role ARN before attempting to assume it
+        if not validate_role_arn(cross_account_role):
+            raise ValueError(f"Invalid cross-account role ARN format: {cross_account_role[:50]}...")
+
         logger.info(f"Assuming cross-account role: {cross_account_role}")
         assumed_role = sts_client.assume_role(
             RoleArn=cross_account_role,
-            RoleSessionName='QScannerSession'
+            RoleSessionName='QScannerSession',
+            DurationSeconds=900  # Minimum duration for security
         )
 
         lambda_client_temp = boto3.client(

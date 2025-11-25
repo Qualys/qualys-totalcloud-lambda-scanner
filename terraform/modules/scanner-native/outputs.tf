@@ -57,3 +57,13 @@ output "cloudtrail_bucket_name" {
   description = "Name of the CloudTrail S3 bucket"
   value       = aws_s3_bucket.cloudtrail.id
 }
+
+output "kms_key_arn" {
+  description = "ARN of the KMS key used for encryption"
+  value       = aws_kms_key.scanner.arn
+}
+
+output "kms_key_id" {
+  description = "ID of the KMS key used for encryption"
+  value       = aws_kms_key.scanner.key_id
+}
