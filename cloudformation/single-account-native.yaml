@@ -1,0 +1,892 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Qualys Lambda Scanner - Single Account'
+
+Parameters:
+  QualysPod:
+    Type: String
+    Description: 'Qualys POD (e.g., US1, US2, EU1)'
+    Default: 'US2'
+    AllowedValues:
+      - US1
+      - US2
+      - US3
+      - US4
+      - GOV1
+      - EU1
+      - EU2
+      - EU3
+      - IN1
+      - CA1
+      - AE1
+      - UK1
+      - AU1
+      - KSA1
+
+  QualysSecretArn:
+    Type: String
+    Description: 'ARN of existing Secrets Manager secret containing Qualys credentials'
+
+  QScannerLayerArn:
+    Type: String
+    Description: 'ARN of the Lambda Layer containing QScanner binary'
+
+  LambdaCodeBucket:
+    Type: String
+    Description: 'S3 bucket containing Lambda code artifacts (leave empty to use inline placeholder code)'
+    Default: ''
+
+  LambdaCodeKey:
+    Type: String
+    Description: 'S3 key for scanner Lambda code zip'
+    Default: 'qualys-lambda-scanner/lambda-code.zip'
+
+  BulkScanCodeKey:
+    Type: String
+    Description: 'S3 key for bulk scan Lambda code zip'
+    Default: 'qualys-lambda-scanner/bulk-scan.zip'
+
+  EnableS3Results:
+    Type: String
+    Description: 'Create S3 bucket for storing scan results'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  EnableSNSNotifications:
+    Type: String
+    Description: 'Create SNS topic for scan notifications'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  ScannerMemorySize:
+    Type: Number
+    Description: 'Memory size for Scanner Lambda (MB)'
+    Default: 2048
+    MinValue: 512
+    MaxValue: 10240
+
+  ScannerTimeout:
+    Type: Number
+    Description: 'Timeout for Scanner Lambda (seconds)'
+    Default: 900
+    MinValue: 60
+    MaxValue: 900
+
+  ScannerEphemeralStorage:
+    Type: Number
+    Description: 'Ephemeral storage for Scanner Lambda (MB)'
+    Default: 2048
+    MinValue: 512
+    MaxValue: 10240
+
+  EnableScanCache:
+    Type: String
+    Description: 'Enable DynamoDB scan cache to prevent duplicate scans'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  CacheTTLDays:
+    Type: Number
+    Description: 'Number of days to cache scan results'
+    Default: 30
+    MinValue: 1
+    MaxValue: 365
+
+  CreateCloudTrail:
+    Type: String
+    Description: 'Create new CloudTrail (false if you have existing trail)'
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  ScannerReservedConcurrency:
+    Type: Number
+    Description: 'Reserved concurrent executions for Scanner Lambda (0 = no limit)'
+    Default: 0
+    MinValue: 0
+    MaxValue: 100
+
+  EnableTagging:
+    Type: String
+    Description: 'Enable AWS Lambda resource tagging with scan results (set false if customer policy forbids Lambda tags)'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  EnableBulkScan:
+    Type: String
+    Description: 'Enable bulk scan Lambda to scan existing functions'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  BulkScanSchedule:
+    Type: String
+    Description: 'Cron schedule for periodic bulk scans (empty = manual only). Example: cron(0 2 ? * SUN *) for weekly Sunday 2am'
+    Default: ''
+
+Conditions:
+  CreateS3Bucket: !Equals [!Ref EnableS3Results, 'true']
+  CreateSNSTopic: !Equals [!Ref EnableSNSNotifications, 'true']
+  CreateScanCache: !Equals [!Ref EnableScanCache, 'true']
+  CreateTrail: !Equals [!Ref CreateCloudTrail, 'true']
+  CreateBulkScan: !Equals [!Ref EnableBulkScan, 'true']
+  CreateBulkScanSchedule: !And
+    - !Condition CreateBulkScan
+    - !Not [!Equals [!Ref BulkScanSchedule, '']]
+  UseS3Code: !Not [!Equals [!Ref LambdaCodeBucket, '']]
+  HasReservedConcurrency: !Not [!Equals [!Ref ScannerReservedConcurrency, 0]]
+
+Resources:
+  # KMS key for encrypting sensitive data (DynamoDB, SQS, SNS, CloudWatch Logs)
+  ScannerKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS key for Qualys Lambda Scanner encryption'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableIAMUserPermissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+            Condition:
+              ArnLike:
+                'kms:EncryptionContext:aws:logs:arn': !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+          - Sid: AllowSNS
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - 'kms:Decrypt'
+              - 'kms:GenerateDataKey*'
+            Resource: '*'
+          - Sid: AllowCloudTrail
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action:
+              - 'kms:Encrypt*'
+              - 'kms:Decrypt*'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:Describe*'
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-kms-key'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ScannerKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-scanner'
+      TargetKeyId: !Ref ScannerKMSKey
+
+  ScanResultsBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateS3Bucket
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-scan-results-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldScans
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpirationInDays: 30
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-scan-results'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ScanNotificationsTopic:
+    Type: AWS::SNS::Topic
+    Condition: CreateSNSTopic
+    Properties:
+      TopicName: !Sub '${AWS::StackName}-scan-notifications'
+      DisplayName: 'Qualys Lambda Scan Notifications'
+      KmsMasterKeyId: !Ref ScannerKMSKey
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-scan-notifications'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ScanCacheTable:
+    Type: AWS::DynamoDB::Table
+    Condition: CreateScanCache
+    Properties:
+      TableName: !Sub '${AWS::StackName}-scan-cache'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: function_arn
+          AttributeType: S
+      KeySchema:
+        - AttributeName: function_arn
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref ScannerKMSKey
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-scan-cache'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ScannerDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${AWS::StackName}-scanner-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: !Ref ScannerKMSKey
+      KmsDataKeyReusePeriodSeconds: 300
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-scanner-dlq'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ScannerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-scanner-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ScannerLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ECRAuthToken
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                # Note: ecr:GetAuthorizationToken requires Resource: "*" per AWS documentation
+                Resource: '*'
+              - Sid: ECRRepositoryAccess
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:DescribeImages
+                Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*'
+              - Sid: LambdaRead
+                Effect: Allow
+                Action:
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+              - Sid: LambdaTag
+                Effect: Allow
+                Action:
+                  - lambda:TagResource
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+                Condition:
+                  'ForAllValues:StringLike':
+                    'aws:TagKeys':
+                      - 'QualysScan*'
+              - Sid: SecretsManagerRead
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref QualysSecretArn
+              - Sid: SQSDeadLetterQueue
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt ScannerDeadLetterQueue.Arn
+              - Sid: CloudWatchMetrics
+                Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                # Note: cloudwatch:PutMetricData requires Resource: "*" per AWS documentation
+                # but we restrict to our namespace via condition key
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': 'QualysLambdaScanner'
+              - Sid: KMSAccess
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !GetAtt ScannerKMSKey.Arn
+              - Sid: XRayTracing
+                Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+              - !If
+                - CreateScanCache
+                - Sid: DynamoDBAccess
+                  Effect: Allow
+                  Action:
+                    - dynamodb:GetItem
+                    - dynamodb:PutItem
+                    - dynamodb:UpdateItem
+                  Resource: !GetAtt ScanCacheTable.Arn
+                - !Ref AWS::NoValue
+              - !If
+                - CreateS3Bucket
+                - Sid: S3Write
+                  Effect: Allow
+                  Action:
+                    - s3:PutObject
+                  Resource: !Sub '${ScanResultsBucket.Arn}/*'
+                - !Ref AWS::NoValue
+              - !If
+                - CreateSNSTopic
+                - Sid: SNSPublish
+                  Effect: Allow
+                  Action:
+                    - sns:Publish
+                  Resource: !Ref ScanNotificationsTopic
+                - !Ref AWS::NoValue
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-scanner-lambda-role'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ScannerLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-scanner'
+      RetentionInDays: 30
+      KmsKeyId: !GetAtt ScannerKMSKey.Arn
+
+  ScannerLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-scanner'
+      Description: 'Scans Lambda functions using Qualys QScanner (native runtime)'
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt ScannerLambdaRole.Arn
+      MemorySize: !Ref ScannerMemorySize
+      Timeout: !Ref ScannerTimeout
+      # Reserved concurrency prevents runaway invocations (0 = no limit)
+      ReservedConcurrentExecutions: !If [HasReservedConcurrency, !Ref ScannerReservedConcurrency, !Ref 'AWS::NoValue']
+      EphemeralStorage:
+        Size: !Ref ScannerEphemeralStorage
+      Layers:
+        - !Ref QScannerLayerArn
+      DeadLetterConfig:
+        TargetArn: !GetAtt ScannerDeadLetterQueue.Arn
+      # Enable X-Ray tracing for debugging and auditing
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          QUALYS_SECRET_ARN: !Ref QualysSecretArn
+          RESULTS_S3_BUCKET: !If [CreateS3Bucket, !Ref ScanResultsBucket, '']
+          SNS_TOPIC_ARN: !If [CreateSNSTopic, !Ref ScanNotificationsTopic, '']
+          SCAN_CACHE_TABLE: !If [CreateScanCache, !Ref ScanCacheTable, '']
+          SCAN_TIMEOUT: '300'
+          CACHE_TTL_DAYS: !Ref CacheTTLDays
+          QSCANNER_PATH: '/opt/bin/qscanner'
+          ENABLE_TAGGING: !Ref EnableTagging
+      Code: !If
+        - UseS3Code
+        - S3Bucket: !Ref LambdaCodeBucket
+          S3Key: !Ref LambdaCodeKey
+        - ZipFile: |
+            def lambda_handler(event, context):
+                return {"statusCode": 501, "body": "Replace with lambda_function.py code"}
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-scanner'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  LambdaCreateEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-lambda-create'
+      Description: 'Trigger scanner when Lambda function is created'
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.lambda
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - lambda.amazonaws.com
+          eventName:
+            - CreateFunction20150331
+      Targets:
+        - Arn: !GetAtt ScannerLambdaFunction.Arn
+          Id: ScannerLambdaTarget
+
+  LambdaUpdateCodeEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-lambda-update-code'
+      Description: 'Trigger scanner when Lambda function code is updated'
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.lambda
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - lambda.amazonaws.com
+          eventName:
+            - UpdateFunctionCode20150331v2
+      Targets:
+        - Arn: !GetAtt ScannerLambdaFunction.Arn
+          Id: ScannerLambdaTarget
+
+  LambdaUpdateConfigEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${AWS::StackName}-lambda-update-config'
+      Description: 'Trigger scanner when Lambda function configuration is updated'
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.lambda
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - lambda.amazonaws.com
+          eventName:
+            - UpdateFunctionConfiguration20150331v2
+      Targets:
+        - Arn: !GetAtt ScannerLambdaFunction.Arn
+          Id: ScannerLambdaTarget
+
+  LambdaCreateEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScannerLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LambdaCreateEventRule.Arn
+
+  LambdaUpdateCodeEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScannerLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LambdaUpdateCodeEventRule.Arn
+
+  LambdaUpdateConfigEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScannerLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LambdaUpdateConfigEventRule.Arn
+
+  CloudTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: CreateTrail
+    Properties:
+      LogGroupName: !Sub '/aws/cloudtrail/${AWS::StackName}'
+      RetentionInDays: 7
+      KmsKeyId: !GetAtt ScannerKMSKey.Arn
+
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateTrail
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-cloudtrail-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref ScannerKMSKey
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 7
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateTrail
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-trail'
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': bucket-owner-full-control
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${AWS::StackName}-trail'
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt CloudTrailBucket.Arn
+              - !Sub '${CloudTrailBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    Condition: CreateTrail
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      TrailName: !Sub '${AWS::StackName}-trail'
+      S3BucketName: !Ref CloudTrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: false
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      CloudWatchLogsLogGroupArn: !Sub '${CloudTrailLogGroup.Arn}:*'
+      CloudWatchLogsRoleArn: !GetAtt CloudTrailLogsRole.Arn
+      # Use AdvancedEventSelectors to only log Lambda management events
+      # This reduces CloudTrail costs by avoiding ALL management events from all services
+      # Note: CloudTrail doesn't support filtering to specific API calls, only by service
+      AdvancedEventSelectors:
+        - Name: 'LambdaManagementEvents'
+          FieldSelectors:
+            - Field: 'eventCategory'
+              Equals:
+                - 'Management'
+            - Field: 'resources.type'
+              Equals:
+                - 'AWS::Lambda::Function'
+
+  CloudTrailLogsRole:
+    Type: AWS::IAM::Role
+    Condition: CreateTrail
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-cloudtrail-logs-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudTrailLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub '${CloudTrailLogGroup.Arn}:*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-cloudtrail-logs-role'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # CloudWatch Alarms for monitoring scanner health
+  ScannerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateSNSTopic
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-scanner-errors'
+      AlarmDescription: 'Scanner Lambda has errors'
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ScannerLambdaFunction
+      AlarmActions:
+        - !Ref ScanNotificationsTopic
+
+  ScannerThrottlesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateSNSTopic
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-scanner-throttles'
+      AlarmDescription: 'Scanner Lambda is being throttled'
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ScannerLambdaFunction
+      AlarmActions:
+        - !Ref ScanNotificationsTopic
+
+  ScannerDLQMessagesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateSNSTopic
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-scanner-dlq-messages'
+      AlarmDescription: 'Messages in scanner DLQ - indicates failed scans'
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ScannerDeadLetterQueue.QueueName
+      AlarmActions:
+        - !Ref ScanNotificationsTopic
+
+  ScannerDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: CreateSNSTopic
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-scanner-duration'
+      AlarmDescription: 'Scanner Lambda approaching timeout threshold'
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Sub
+        - '${TimeoutMillis}'
+        - TimeoutMillis: !Join ['', [!Ref ScannerTimeout, '000']]  # Convert to milliseconds, then 80%
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ScannerLambdaFunction
+      AlarmActions:
+        - !Ref ScanNotificationsTopic
+
+  # =============================================================================
+  # Bulk Scan Lambda (Optional) - Scans existing functions
+  # =============================================================================
+
+  BulkScanLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: CreateBulkScan
+    Properties:
+      RoleName: !Sub '${AWS::StackName}-bulk-scan-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BulkScanPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListLambdaFunctions
+                Effect: Allow
+                Action:
+                  - lambda:ListFunctions
+                Resource: '*'
+              - Sid: InvokeScanner
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt ScannerLambdaFunction.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-bulk-scan-role'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  BulkScanLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: CreateBulkScan
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}-bulk-scan'
+      RetentionInDays: 7
+      KmsKeyId: !GetAtt ScannerKMSKey.Arn
+
+  BulkScanLambdaFunction:
+    Type: AWS::Lambda::Function
+    Condition: CreateBulkScan
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-bulk-scan'
+      Description: 'Scans all existing Lambda functions by invoking the scanner'
+      Runtime: python3.11
+      Handler: bulk_scan.lambda_handler
+      Role: !GetAtt BulkScanLambdaRole.Arn
+      MemorySize: 256
+      Timeout: 900
+      Environment:
+        Variables:
+          SCANNER_FUNCTION_NAME: !Ref ScannerLambdaFunction
+          EXCLUDE_PATTERNS: !Sub '${AWS::StackName}-scanner,${AWS::StackName}-bulk-scan'
+          INVOCATION_DELAY_MS: '100'
+      Code: !If
+        - UseS3Code
+        - S3Bucket: !Ref LambdaCodeBucket
+          S3Key: !Ref BulkScanCodeKey
+        - ZipFile: |
+            def lambda_handler(event, context):
+                return {"statusCode": 501, "body": "Replace with bulk_scan.py code"}
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-bulk-scan'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  BulkScanScheduleRule:
+    Type: AWS::Events::Rule
+    Condition: CreateBulkScanSchedule
+    Properties:
+      Name: !Sub '${AWS::StackName}-bulk-scan-schedule'
+      Description: 'Scheduled bulk scan of existing Lambda functions'
+      State: ENABLED
+      ScheduleExpression: !Ref BulkScanSchedule
+      Targets:
+        - Arn: !GetAtt BulkScanLambdaFunction.Arn
+          Id: BulkScanTarget
+          Input: '{}'
+
+  BulkScanSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: CreateBulkScanSchedule
+    Properties:
+      FunctionName: !Ref BulkScanLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BulkScanScheduleRule.Arn
+
+Outputs:
+  ScannerLambdaArn:
+    Description: 'ARN of the Scanner Lambda function'
+    Value: !GetAtt ScannerLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ScannerLambdaArn'
+
+  ScanResultsBucketName:
+    Description: 'Name of the S3 bucket for scan results'
+    Condition: CreateS3Bucket
+    Value: !Ref ScanResultsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ScanResultsBucket'
+
+  ScanNotificationsTopicArn:
+    Description: 'ARN of the SNS topic for scan notifications'
+    Condition: CreateSNSTopic
+    Value: !Ref ScanNotificationsTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-ScanNotificationsTopic'
+
+  CloudTrailName:
+    Description: 'Name of the CloudTrail trail'
+    Condition: CreateTrail
+    Value: !Ref CloudTrail
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudTrail'
+
+  ScanCacheTableName:
+    Description: 'Name of the DynamoDB scan cache table'
+    Condition: CreateScanCache
+    Value: !Ref ScanCacheTable
+    Export:
+      Name: !Sub '${AWS::StackName}-ScanCacheTable'
+
+  KMSKeyArn:
+    Description: 'ARN of the KMS key used for encryption'
+    Value: !GetAtt ScannerKMSKey.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-KMSKeyArn'
+
+  BulkScanLambdaArn:
+    Description: 'ARN of the Bulk Scan Lambda function'
+    Condition: CreateBulkScan
+    Value: !GetAtt BulkScanLambdaFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-BulkScanLambdaArn'
