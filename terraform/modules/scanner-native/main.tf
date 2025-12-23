@@ -99,6 +99,112 @@ resource "aws_kms_alias" "scanner" {
   target_key_id = aws_kms_key.scanner.key_id
 }
 
+# S3 Access Logs Bucket (CIS Benchmark 3.6)
+resource "aws_s3_bucket" "access_logs" {
+  count = var.enable_access_logging ? 1 : 0
+
+  bucket = "${var.stack_name}-access-logs-${data.aws_caller_identity.current.account_id}"
+
+  tags = merge(
+    var.tags,
+    {
+      Name      = "${var.stack_name}-access-logs"
+      ManagedBy = "Terraform"
+    }
+  )
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "access_logs" {
+  count = var.enable_access_logging ? 1 : 0
+
+  bucket = aws_s3_bucket.access_logs[0].id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "access_logs" {
+  count = var.enable_access_logging ? 1 : 0
+
+  bucket = aws_s3_bucket.access_logs[0].id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
+  count = var.enable_access_logging ? 1 : 0
+
+  bucket = aws_s3_bucket.access_logs[0].id
+
+  rule {
+    id     = "DeleteOldAccessLogs"
+    status = "Enabled"
+
+    expiration {
+      days = 90
+    }
+  }
+}
+
+resource "aws_s3_bucket_ownership_controls" "access_logs" {
+  count = var.enable_access_logging ? 1 : 0
+
+  bucket = aws_s3_bucket.access_logs[0].id
+
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
+resource "aws_s3_bucket_policy" "access_logs" {
+  count  = var.enable_access_logging ? 1 : 0
+  bucket = aws_s3_bucket.access_logs[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "S3ServerAccessLogsPolicy"
+        Effect = "Allow"
+        Principal = {
+          Service = "logging.s3.amazonaws.com"
+        }
+        Action   = "s3:PutObject"
+        Resource = "${aws_s3_bucket.access_logs[0].arn}/*"
+        Condition = {
+          ArnLike = {
+            "aws:SourceArn" = "arn:aws:s3:::${var.stack_name}-*"
+          }
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+        }
+      },
+      {
+        Sid       = "DenyUnencryptedTransport"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:*"
+        Resource = [
+          aws_s3_bucket.access_logs[0].arn,
+          "${aws_s3_bucket.access_logs[0].arn}/*"
+        ]
+        Condition = {
+          Bool = {
+            "aws:SecureTransport" = "false"
+          }
+        }
+      }
+    ]
+  })
+}
+
 # Create Lambda Layer for QScanner binary
 resource "aws_lambda_layer_version" "qscanner" {
   filename            = var.qscanner_layer_zip
@@ -243,6 +349,16 @@ resource "aws_s3_bucket_lifecycle_configuration" "scan_results" {
       noncurrent_days = 30
     }
   }
+}
+
+# S3 Access Logging for scan results bucket (CIS Benchmark 3.6)
+resource "aws_s3_bucket_logging" "scan_results" {
+  count = var.enable_s3_results && var.enable_access_logging ? 1 : 0
+
+  bucket = aws_s3_bucket.scan_results[0].id
+
+  target_bucket = aws_s3_bucket.access_logs[0].id
+  target_prefix = "scan-results/"
 }
 
 # Bucket policy to enforce HTTPS transport for scan results
@@ -613,6 +729,16 @@ resource "aws_s3_bucket_lifecycle_configuration" "cloudtrail" {
       days = 7
     }
   }
+}
+
+# S3 Access Logging for CloudTrail bucket (CIS Benchmark 3.6)
+resource "aws_s3_bucket_logging" "cloudtrail" {
+  count = var.enable_access_logging ? 1 : 0
+
+  bucket = aws_s3_bucket.cloudtrail.id
+
+  target_bucket = aws_s3_bucket.access_logs[0].id
+  target_prefix = "cloudtrail/"
 }
 
 resource "aws_s3_bucket_policy" "cloudtrail" {

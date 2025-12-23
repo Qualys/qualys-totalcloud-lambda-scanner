@@ -128,6 +128,14 @@ Parameters:
       - 'true'
       - 'false'
 
+  EnableAccessLogging:
+    Type: String
+    Description: 'Enable S3 access logging for audit compliance (CIS Benchmark 3.6)'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
   BulkScanSchedule:
     Type: String
     Description: 'Cron schedule for periodic bulk scans (empty = manual only). Example: cron(0 2 ? * SUN *) for weekly Sunday 2am'
@@ -144,6 +152,13 @@ Conditions:
     - !Not [!Equals [!Ref BulkScanSchedule, '']]
   UseS3Code: !Not [!Equals [!Ref LambdaCodeBucket, '']]
   HasReservedConcurrency: !Not [!Equals [!Ref ScannerReservedConcurrency, 0]]
+  CreateAccessLogging: !Equals [!Ref EnableAccessLogging, 'true']
+  CreateAccessLoggingForResults: !And
+    - !Condition CreateS3Bucket
+    - !Condition CreateAccessLogging
+  CreateAccessLoggingForTrail: !And
+    - !Condition CreateTrail
+    - !Condition CreateAccessLogging
 
 Resources:
   # KMS key for encrypting sensitive data (DynamoDB, SQS, SNS, CloudWatch Logs)
@@ -207,6 +222,65 @@ Resources:
       AliasName: !Sub 'alias/${AWS::StackName}-scanner'
       TargetKeyId: !Ref ScannerKMSKey
 
+  # S3 Access Logs Bucket (CIS Benchmark 3.6)
+  AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateAccessLogging
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-access-logs-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-access-logs'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateAccessLogging
+    Properties:
+      Bucket: !Ref AccessLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3ServerAccessLogsPolicy
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${AccessLogsBucket.Arn}/*'
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:s3:::${AWS::StackName}-*'
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt AccessLogsBucket.Arn
+              - !Sub '${AccessLogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
   ScanResultsBucket:
     Type: AWS::S3::Bucket
     Condition: CreateS3Bucket
@@ -223,6 +297,11 @@ Resources:
         RestrictPublicBuckets: true
       VersioningConfiguration:
         Status: Enabled
+      LoggingConfiguration: !If
+        - CreateAccessLoggingForResults
+        - DestinationBucketName: !Ref AccessLogsBucket
+          LogFilePrefix: 'scan-results/'
+        - !Ref AWS::NoValue
       LifecycleConfiguration:
         Rules:
           - Id: DeleteOldScans
@@ -560,6 +639,11 @@ Resources:
         RestrictPublicBuckets: true
       VersioningConfiguration:
         Status: Enabled
+      LoggingConfiguration: !If
+        - CreateAccessLoggingForTrail
+        - DestinationBucketName: !Ref AccessLogsBucket
+          LogFilePrefix: 'cloudtrail/'
+        - !Ref AWS::NoValue
       LifecycleConfiguration:
         Rules:
           - Id: DeleteOldLogs
@@ -890,3 +974,10 @@ Outputs:
     Value: !GetAtt BulkScanLambdaFunction.Arn
     Export:
       Name: !Sub '${AWS::StackName}-BulkScanLambdaArn'
+
+  AccessLogsBucketName:
+    Description: 'Name of the S3 bucket for access logs'
+    Condition: CreateAccessLogging
+    Value: !Ref AccessLogsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-AccessLogsBucket'

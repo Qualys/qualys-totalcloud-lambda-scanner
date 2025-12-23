@@ -141,6 +141,14 @@ Parameters:
     Description: 'Comma-separated list of regions for bulk scan (empty = current region only)'
     Default: ''
 
+  EnableAccessLogging:
+    Type: String
+    Description: 'Enable S3 access logging for audit compliance (CIS Benchmark 3.6)'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
   ScannerExternalId:
     Type: String
     Description: 'External ID for cross-account role assumption (must match spoke deployments)'
@@ -158,6 +166,10 @@ Conditions:
     - !Condition CreateBulkScan
     - !Not [!Equals [!Ref BulkScanSchedule, '']]
   UseReservedConcurrency: !Not [!Equals [!Ref ScannerReservedConcurrency, 0]]
+  CreateAccessLogging: !Equals [!Ref EnableAccessLogging, 'true']
+  CreateAccessLoggingForResults: !And
+    - !Condition CreateS3Bucket
+    - !Condition CreateAccessLogging
 
 Resources:
   # KMS key for encrypting sensitive data (DynamoDB, SQS, SNS, CloudWatch Logs)
@@ -209,6 +221,65 @@ Resources:
     Properties:
       AliasName: !Sub 'alias/${AWS::StackName}-scanner'
       TargetKeyId: !Ref ScannerKMSKey
+
+  # S3 Access Logs Bucket (CIS Benchmark 3.6)
+  AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateAccessLogging
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-access-logs-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-access-logs'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Condition: CreateAccessLogging
+    Properties:
+      Bucket: !Ref AccessLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: S3ServerAccessLogsPolicy
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${AccessLogsBucket.Arn}/*'
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:s3:::${AWS::StackName}-*'
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+          - Sid: DenyUnencryptedTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt AccessLogsBucket.Arn
+              - !Sub '${AccessLogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
 
   # Central EventBridge Bus
   CentralEventBus:
@@ -274,6 +345,11 @@ Resources:
         RestrictPublicBuckets: true
       VersioningConfiguration:
         Status: Enabled
+      LoggingConfiguration: !If
+        - CreateAccessLoggingForResults
+        - DestinationBucketName: !Ref AccessLogsBucket
+          LogFilePrefix: 'scan-results/'
+        - !Ref AWS::NoValue
       LifecycleConfiguration:
         Rules:
           - Id: DeleteOldScans
@@ -404,12 +480,20 @@ Resources:
                   - secretsmanager:GetSecretValue
                 Resource: !Ref QualysCredentialsSecret
 
-              # STS Assume Role (cross-account) - spoke trust policy enforces security
+              # STS Assume Role (cross-account) - scoped to organization when using OrganizationId
+              # The spoke trust policy provides additional security via ExternalId validation
+              # When using OrganizationId: restricts to accounts within the organization
+              # When using explicit SpokeAccountIds: spoke trust policy enforces access control
               - Sid: AssumeRoleInSpokeAccounts
                 Effect: Allow
                 Action:
                   - sts:AssumeRole
                 Resource: 'arn:aws:iam::*:role/qualys-lambda-scanner-spoke-role'
+                Condition: !If
+                  - UseOrganization
+                  - StringEquals:
+                      'aws:ResourceOrgID': !Ref OrganizationId
+                  - !Ref AWS::NoValue
 
               # SQS Dead Letter Queue
               - Sid: SQSDeadLetterQueue
@@ -619,11 +703,17 @@ Resources:
                   - lambda:InvokeFunction
                 Resource: !GetAtt ScannerLambdaFunction.Arn
               # Assume role in spoke accounts to list their functions
+              # Scoped to organization when OrganizationId is provided
               - Sid: AssumeRoleInSpokeAccounts
                 Effect: Allow
                 Action:
                   - sts:AssumeRole
                 Resource: 'arn:aws:iam::*:role/qualys-lambda-scanner-spoke-role'
+                Condition: !If
+                  - UseOrganization
+                  - StringEquals:
+                      'aws:ResourceOrgID': !Ref OrganizationId
+                  - !Ref AWS::NoValue
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-bulk-scan-role'
@@ -910,3 +1000,10 @@ Outputs:
     Value: !GetAtt BulkScanLambdaFunction.Arn
     Export:
       Name: !Sub '${AWS::StackName}-BulkScanLambdaArn'
+
+  AccessLogsBucketName:
+    Description: 'Name of the S3 bucket for access logs'
+    Condition: CreateAccessLogging
+    Value: !Ref AccessLogsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-AccessLogsBucket'

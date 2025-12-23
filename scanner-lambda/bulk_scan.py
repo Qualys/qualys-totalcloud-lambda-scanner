@@ -19,9 +19,25 @@ SCANNER_FUNCTION_NAME = os.environ.get('SCANNER_FUNCTION_NAME', '')
 CROSS_ACCOUNT_ROLE_NAME = os.environ.get('CROSS_ACCOUNT_ROLE_NAME', '')
 SCANNER_EXTERNAL_ID = os.environ.get('SCANNER_EXTERNAL_ID', '')
 EXCLUDE_PATTERNS = os.environ.get('EXCLUDE_PATTERNS', 'qualys-lambda-scanner,bulk-scan').split(',')
-INVOCATION_DELAY_MS = int(os.environ.get('INVOCATION_DELAY_MS', '100'))
-MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '10'))
-BATCH_SIZE = int(os.environ.get('BATCH_SIZE', '100'))
+
+try:
+    INVOCATION_DELAY_MS = int(os.environ.get('INVOCATION_DELAY_MS', '100'))
+except ValueError:
+    logger.warning("Invalid INVOCATION_DELAY_MS, using default 100")
+    INVOCATION_DELAY_MS = 100
+
+try:
+    MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '10'))
+except ValueError:
+    logger.warning("Invalid MAX_WORKERS, using default 10")
+    MAX_WORKERS = 10
+
+try:
+    BATCH_SIZE = int(os.environ.get('BATCH_SIZE', '100'))
+except ValueError:
+    logger.warning("Invalid BATCH_SIZE, using default 100")
+    BATCH_SIZE = 100
+
 CURRENT_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 DEFAULT_REGIONS = [r.strip() for r in os.environ.get('DEFAULT_REGIONS', '').split(',') if r.strip()]
 

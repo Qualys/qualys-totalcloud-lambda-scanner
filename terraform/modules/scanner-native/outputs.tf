@@ -67,3 +67,13 @@ output "kms_key_id" {
   description = "ID of the KMS key used for encryption"
   value       = aws_kms_key.scanner.key_id
 }
+
+output "access_logs_bucket_name" {
+  description = "Name of the S3 bucket for access logs"
+  value       = var.enable_access_logging ? aws_s3_bucket.access_logs[0].id : null
+}
+
+output "access_logs_bucket_arn" {
+  description = "ARN of the S3 bucket for access logs"
+  value       = var.enable_access_logging ? aws_s3_bucket.access_logs[0].arn : null
+}

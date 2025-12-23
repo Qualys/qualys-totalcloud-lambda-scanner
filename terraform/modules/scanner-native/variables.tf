@@ -102,6 +102,12 @@ variable "scanner_reserved_concurrency" {
   }
 }
 
+variable "enable_access_logging" {
+  description = "Enable S3 access logging for audit compliance (CIS Benchmark 3.6)"
+  type        = bool
+  default     = true
+}
+
 variable "tags" {
   description = "Tags to apply to all resources"
   type        = map(string)
