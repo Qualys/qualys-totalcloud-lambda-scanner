@@ -177,7 +177,6 @@ deploy: publish-layer upload-function create-secret
 		--template-file cloudformation/single-account-native.yaml \
 		--stack-name $(STACK_NAME) \
 		--parameter-overrides \
-			QualysPod=$(QUALYS_POD) \
 			QualysSecretArn=$$(cat build/secret-arn.txt) \
 			QScannerLayerArn=$$(cat build/layer-arn.txt) \
 			LambdaCodeBucket=$(S3_BUCKET) \
@@ -322,19 +321,14 @@ delete-stackset:
 # =============================================================================
 
 # Deploy hub scanner in security/central account
-deploy-hub: upload-artifacts
+deploy-hub: upload-artifacts create-secret
 	@echo "Deploying centralized hub scanner..."
-	@if [ -z "$(QUALYS_ACCESS_TOKEN)" ]; then \
-		echo "ERROR: QUALYS_ACCESS_TOKEN environment variable not set"; \
-		exit 1; \
-	fi
 	@BUCKET=$$(cat build/artifacts-bucket.txt); \
 	aws cloudformation deploy \
 		--template-file cloudformation/centralized-hub.yaml \
 		--stack-name $(STACK_NAME)-hub \
 		--parameter-overrides \
-			QualysPod=$(QUALYS_POD) \
-			QualysAccessToken=$(QUALYS_ACCESS_TOKEN) \
+			QualysSecretArn=$$(cat build/secret-arn.txt) \
 			ArtifactsBucket=$$BUCKET \
 			OrganizationId=$(ORG_ID) \
 			ScannerExternalId=$(EXTERNAL_ID) \

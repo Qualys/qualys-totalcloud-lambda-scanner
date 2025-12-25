@@ -224,27 +224,9 @@ data "archive_file" "lambda_function" {
   output_path = "${path.module}/builds/lambda_function.zip"
 }
 
-# Create Secrets Manager secret for Qualys credentials
-resource "aws_secretsmanager_secret" "qualys_credentials" {
-  name        = "${var.stack_name}-qualys-credentials"
-  description = "Qualys credentials for Lambda scanner"
-
-  tags = merge(
-    var.tags,
-    {
-      Name      = "${var.stack_name}-qualys-credentials"
-      ManagedBy = "Terraform"
-    }
-  )
-}
-
-resource "aws_secretsmanager_secret_version" "qualys_credentials" {
-  secret_id = aws_secretsmanager_secret.qualys_credentials.id
-  secret_string = jsonencode({
-    qualys_pod          = var.qualys_pod
-    qualys_access_token = var.qualys_access_token
-  })
-}
+# Qualys credentials are stored in an externally-created Secrets Manager secret
+# This follows security best practice - secrets should not be created in IaC
+# to avoid storing sensitive values in state files
 
 # DynamoDB table for scan caching
 resource "aws_dynamodb_table" "scan_cache" {
@@ -515,7 +497,7 @@ resource "aws_iam_role_policy" "scanner_lambda" {
         Action = [
           "secretsmanager:GetSecretValue"
         ]
-        Resource = aws_secretsmanager_secret.qualys_credentials.arn
+        Resource = var.qualys_secret_arn
       },
       {
         Sid    = "SQSDeadLetterQueue"
@@ -650,13 +632,14 @@ resource "aws_lambda_function" "scanner" {
 
   environment {
     variables = {
-      QUALYS_SECRET_ARN = aws_secretsmanager_secret.qualys_credentials.arn
+      QUALYS_SECRET_ARN = var.qualys_secret_arn
       RESULTS_S3_BUCKET = var.enable_s3_results ? aws_s3_bucket.scan_results[0].id : ""
       SNS_TOPIC_ARN     = var.enable_sns_notifications ? aws_sns_topic.scan_notifications[0].arn : ""
       SCAN_CACHE_TABLE  = var.enable_scan_cache ? aws_dynamodb_table.scan_cache[0].name : ""
       SCAN_TIMEOUT      = "300"
       CACHE_TTL_DAYS    = tostring(var.cache_ttl_days)
       QSCANNER_PATH     = "/opt/bin/qscanner"
+      ENABLE_TAGGING    = tostring(var.enable_tagging)
     }
   }
 
@@ -805,6 +788,7 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
 resource "aws_cloudwatch_log_group" "cloudtrail" {
   name              = "/aws/cloudtrail/${var.stack_name}"
   retention_in_days = 7
+  kms_key_id        = aws_kms_key.scanner.arn
 
   tags = merge(
     var.tags,

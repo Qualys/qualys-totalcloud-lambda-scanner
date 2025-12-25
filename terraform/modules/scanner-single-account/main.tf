@@ -16,17 +16,18 @@ locals {
 resource "aws_cloudformation_stack" "scanner" {
   name = local.stack_name
 
-  template_body = file("${path.module}/../../../cloudformation/single-account.yaml")
+  template_body = file("${path.module}/../../../cloudformation/single-account-native.yaml")
 
   parameters = {
-    QualysPod                 = var.qualys_pod
-    QualysAccessToken         = var.qualys_access_token
-    ScannerImageUri           = var.scanner_image_uri
+    QualysSecretArn           = var.qualys_secret_arn
+    QScannerLayerArn          = var.qscanner_layer_arn
+    LambdaCodeBucket          = var.lambda_code_bucket
+    LambdaCodeKey             = var.lambda_code_key
     EnableS3Results           = var.enable_s3_results ? "true" : "false"
     EnableSNSNotifications    = var.enable_sns_notifications ? "true" : "false"
-    ScannerMemorySize         = var.scanner_memory_size
-    ScannerTimeout            = var.scanner_timeout
-    ScannerEphemeralStorage   = var.scanner_ephemeral_storage
+    ScannerMemorySize         = tostring(var.scanner_memory_size)
+    ScannerTimeout            = tostring(var.scanner_timeout)
+    ScannerEphemeralStorage   = tostring(var.scanner_ephemeral_storage)
   }
 
   capabilities = ["CAPABILITY_NAMED_IAM"]

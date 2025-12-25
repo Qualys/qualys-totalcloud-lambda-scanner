@@ -14,8 +14,8 @@ output "qscanner_layer_arn" {
 }
 
 output "qualys_secret_arn" {
-  description = "ARN of the Qualys credentials secret"
-  value       = aws_secretsmanager_secret.qualys_credentials.arn
+  description = "ARN of the Qualys credentials secret (input parameter)"
+  value       = var.qualys_secret_arn
 }
 
 output "scan_results_bucket_name" {

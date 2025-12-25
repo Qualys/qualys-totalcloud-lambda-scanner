@@ -10,16 +10,14 @@ variable "stack_name" {
   default     = "qualys-lambda-scanner"
 }
 
-variable "qualys_pod" {
-  description = "Qualys POD (e.g., US2)"
+variable "qualys_secret_arn" {
+  description = "ARN of existing Secrets Manager secret containing Qualys credentials (qualys_pod and qualys_access_token)"
   type        = string
-  default     = "US2"
-}
 
-variable "qualys_access_token" {
-  description = "Qualys Access Token"
-  type        = string
-  sensitive   = true
+  validation {
+    condition     = can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]+:secret:.+$", var.qualys_secret_arn))
+    error_message = "Must be a valid Secrets Manager secret ARN"
+  }
 }
 
 variable "qscanner_layer_zip" {

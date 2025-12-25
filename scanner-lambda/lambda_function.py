@@ -47,6 +47,7 @@ if not QSCANNER_PATH:
     QSCANNER_PATH = '/opt/bin/qscanner'
 
 SCANNER_EXTERNAL_ID = os.environ.get('SCANNER_EXTERNAL_ID')
+CROSS_ACCOUNT_ROLE_NAME = os.environ.get('CROSS_ACCOUNT_ROLE_NAME')
 ENABLE_TAGGING = os.environ.get('ENABLE_TAGGING', 'true').lower() == 'true'
 
 
@@ -174,6 +175,8 @@ def aws_retry(max_retries: int = 5, initial_delay: float = 0.5, max_delay: float
 
 @aws_retry(max_retries=5, initial_delay=0.5)
 def get_qualys_credentials() -> Dict[str, str]:
+    if not QUALYS_SECRET_ARN:
+        raise ValueError("QUALYS_SECRET_ARN environment variable not set")
     response = secrets_manager.get_secret_value(SecretId=QUALYS_SECRET_ARN)
     secret = json.loads(response['SecretString'])
 
@@ -518,9 +521,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             }
 
         qualys_creds = get_qualys_credentials()
-        cross_account_role = os.environ.get('CROSS_ACCOUNT_ROLE_ARN')
 
-        target_lambda_client = get_target_lambda_client(cross_account_role)
+        # For cross-account scanning, construct the role ARN from the target account ID
+        cross_account_role_arn = None
+        if CROSS_ACCOUNT_ROLE_NAME:
+            target_account_id = event.get('account', detail.get('userIdentity', {}).get('accountId'))
+            if target_account_id:
+                cross_account_role_arn = f"arn:aws:iam::{target_account_id}:role/{CROSS_ACCOUNT_ROLE_NAME}"
+
+        target_lambda_client = get_target_lambda_client(cross_account_role_arn)
         lambda_details = get_lambda_details(function_arn, target_lambda_client)
 
         code_sha256 = lambda_details.get('code_sha256')

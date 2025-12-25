@@ -4,24 +4,14 @@ variable "stack_name" {
   default     = "qualys-lambda-scanner"
 }
 
-variable "qualys_pod" {
-  description = "Qualys POD (e.g., US1, US2, EU1)"
+variable "qualys_secret_arn" {
+  description = "ARN of existing Secrets Manager secret containing Qualys credentials (qualys_pod and qualys_access_token)"
   type        = string
 
   validation {
-    condition = contains([
-      "US1", "US2", "US3", "US4", "GOV1",
-      "EU1", "EU2", "EU3",
-      "IN1", "CA1", "AE1", "UK1", "AU1", "KSA1"
-    ], var.qualys_pod)
-    error_message = "Qualys POD must be one of: US1, US2, US3, US4, GOV1, EU1, EU2, EU3, IN1, CA1, AE1, UK1, AU1, KSA1"
+    condition     = can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]+:secret:.+$", var.qualys_secret_arn))
+    error_message = "Must be a valid Secrets Manager secret ARN"
   }
-}
-
-variable "qualys_access_token" {
-  description = "Qualys Access Token (stored in Secrets Manager)"
-  type        = string
-  sensitive   = true
 }
 
 variable "qscanner_layer_zip" {
@@ -104,6 +94,12 @@ variable "scanner_reserved_concurrency" {
 
 variable "enable_access_logging" {
   description = "Enable S3 access logging for audit compliance (CIS Benchmark 3.6)"
+  type        = bool
+  default     = true
+}
+
+variable "enable_tagging" {
+  description = "Enable AWS Lambda resource tagging with scan results (set to false if customer policy forbids Lambda tags)"
   type        = bool
   default     = true
 }

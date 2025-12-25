@@ -9,6 +9,14 @@ Automated vulnerability scanning for AWS Lambda functions using Qualys QScanner.
 - Qualys Access Token
 - QScanner binary (`scanner-lambda/qscanner.gz`)
 
+## Credentials
+
+Qualys credentials are stored in AWS Secrets Manager before deployment. The Makefile handles this automatically via the `create-secret` target. The secret contains:
+- `qualys_pod`: Your Qualys platform (US1, US2, EU1, etc.)
+- `qualys_access_token`: Your Qualys API access token
+
+This approach follows security best practices by keeping credentials out of CloudFormation parameters and state files.
+
 ## Deployment Options
 
 ### Single Account
@@ -179,6 +187,11 @@ qualys-lambda/
 │   ├── stackset.yaml
 │   ├── centralized-hub.yaml
 │   └── centralized-spoke.yaml
+├── terraform/
+│   └── modules/scanner-native/   # Terraform module
+├── docs/
+│   ├── architecture-guide.md     # Detailed architecture
+│   └── iam-permissions-reference.md
 ├── Makefile
 └── README.md
 ```

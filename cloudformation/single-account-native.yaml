@@ -2,26 +2,6 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: 'Qualys Lambda Scanner - Single Account'
 
 Parameters:
-  QualysPod:
-    Type: String
-    Description: 'Qualys POD (e.g., US1, US2, EU1)'
-    Default: 'US2'
-    AllowedValues:
-      - US1
-      - US2
-      - US3
-      - US4
-      - GOV1
-      - EU1
-      - EU2
-      - EU3
-      - IN1
-      - CA1
-      - AE1
-      - UK1
-      - AU1
-      - KSA1
-
   QualysSecretArn:
     Type: String
     Description: 'ARN of existing Secrets Manager secret containing Qualys credentials'

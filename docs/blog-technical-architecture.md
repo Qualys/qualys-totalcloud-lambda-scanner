@@ -32,28 +32,42 @@ flowchart LR
         QS[QScanner]
     end
 
+    subgraph secrets["Credentials"]
+        SM[Secrets Manager]
+    end
+
     subgraph targets["Targets"]
         L1[Lambda Functions]
         ECR[ECR Images]
     end
 
+    subgraph storage["Results"]
+        S3[S3 Bucket]
+        DDB[DynamoDB Cache]
+        SNS[SNS Notifications]
+    end
+
     subgraph qualys["Qualys Platform"]
         TC[TotalCloud]
-        DASH[Dashboard]
     end
 
     CT --> EB --> QS
+    QS -->|GetSecretValue| SM
     QS -->|GetFunction| L1
     QS -->|BatchGetImage| ECR
-    QS --> TC --> DASH
+    QS --> S3 & DDB
+    QS -->|Notify| SNS
+    QS -->|Report| TC
 
     style triggers fill:#e1f5fe
     style scanner fill:#fff3e0
+    style secrets fill:#fff8e1
     style targets fill:#f3e5f5
+    style storage fill:#e8f5e9
     style qualys fill:#fce4ec
 ```
 
-When a developer deploys or updates a Lambda function, CloudTrail logs the API call. EventBridge routes the event to your scanner Lambda, which executes QScanner against the target. Results flow directly to Qualys TotalCloud, where Lambda vulnerabilities appear alongside findings from EC2, containers, and other cloud assets.
+When a developer deploys or updates a Lambda function, CloudTrail logs the API call. EventBridge routes the event to your scanner Lambda, which retrieves Qualys credentials from Secrets Manager and executes QScanner against the target. Results flow to S3 for artifact storage, DynamoDB for scan caching, and Qualys TotalCloud for centralized vulnerability management.
 
 ## Key Capabilities
 
@@ -150,14 +164,146 @@ qscanner --pod US1 --mode evaluate-policy --policy-tags production function $FUN
 
 This separation of concerns lets developers deploy, security define policy, and tooling enforce. Shift-left security without slowing delivery velocity.
 
+## Deployment Patterns
+
+The scanner supports multiple deployment patterns to match your AWS organization structure.
+
+### Single Account
+
+The simplest deployment monitors Lambda functions within one AWS account. All components deploy to a single region with credentials stored securely in Secrets Manager.
+
+```mermaid
+flowchart TB
+    subgraph account["AWS Account"]
+        subgraph region["Region"]
+            CT[CloudTrail]
+            EB[EventBridge]
+            SM[Secrets Manager]
+            SCAN[Scanner Lambda]
+            TARGETS[Target Functions]
+            S3[Results Bucket]
+            DDB[Cache Table]
+        end
+    end
+
+    CT --> EB --> SCAN
+    SCAN --> SM
+    SCAN --> TARGETS
+    SCAN --> S3 & DDB
+
+    style account fill:#e3f2fd
+    style region fill:#e8f5e9
+```
+
+### Multi-Account with StackSets
+
+For AWS Organizations, deploy scanner infrastructure to all member accounts using CloudFormation StackSets. Each account operates independently with its own credentials and storage.
+
+```mermaid
+flowchart TB
+    subgraph org["AWS Organization"]
+        subgraph mgmt["Management Account"]
+            SS[StackSet]
+        end
+
+        subgraph member1["Member Account A"]
+            SM1[Secrets Manager]
+            SCAN1[Scanner]
+            T1[Functions]
+        end
+
+        subgraph member2["Member Account B"]
+            SM2[Secrets Manager]
+            SCAN2[Scanner]
+            T2[Functions]
+        end
+
+        subgraph member3["Member Account C"]
+            SM3[Secrets Manager]
+            SCAN3[Scanner]
+            T3[Functions]
+        end
+    end
+
+    SS -->|Deploy| SCAN1 & SCAN2 & SCAN3
+    SCAN1 --> SM1
+    SCAN1 --> T1
+    SCAN2 --> SM2
+    SCAN2 --> T2
+    SCAN3 --> SM3
+    SCAN3 --> T3
+
+    style org fill:#e3f2fd
+    style mgmt fill:#fff8e1
+    style member1 fill:#e8f5e9
+    style member2 fill:#fff3e0
+    style member3 fill:#f3e5f5
+```
+
+### Centralized Hub-Spoke
+
+For centralized security operations, deploy a single scanner in a security account that receives events from all member accounts via EventBridge cross-account event forwarding.
+
+```mermaid
+flowchart TB
+    subgraph org["AWS Organization"]
+        subgraph hub["Security Account - Hub"]
+            BUS[Central Event Bus]
+            SM[Secrets Manager]
+            SCAN[Scanner Lambda]
+            S3[Results Bucket]
+            DDB[Cache Table]
+        end
+
+        subgraph spoke1["Member Account A"]
+            CT1[CloudTrail]
+            EB1[EventBridge]
+            ROLE1[Cross-Account Role]
+            T1[Functions]
+        end
+
+        subgraph spoke2["Member Account B"]
+            CT2[CloudTrail]
+            EB2[EventBridge]
+            ROLE2[Cross-Account Role]
+            T2[Functions]
+        end
+    end
+
+    CT1 --> EB1 -->|Forward Events| BUS
+    CT2 --> EB2 -->|Forward Events| BUS
+    BUS --> SCAN
+    SCAN --> SM
+    SCAN -->|AssumeRole| ROLE1 --> T1
+    SCAN -->|AssumeRole| ROLE2 --> T2
+    SCAN --> S3 & DDB
+
+    style org fill:#e3f2fd
+    style hub fill:#fff8e1
+    style spoke1 fill:#e8f5e9
+    style spoke2 fill:#f3e5f5
+```
+
+The hub-spoke pattern provides:
+- **Single point of management**: One scanner, one set of credentials, centralized results
+- **Cross-account security**: External ID prevents confused deputy attacks
+- **Cost efficiency**: Reduced infrastructure across member accounts
+- **Unified visibility**: All scan results in one location
+
 ## Getting Started
 
 To implement agentless Lambda scanning in your environment:
 
-1. **Download QScanner** from the Qualys Portal and test locally against a sample function
-2. **Deploy scanner infrastructure** using CloudFormation or Terraform templates
-3. **Configure EventBridge rules** to trigger scans on function deployments
-4. **Set up QFlow playbooks** for automated response to critical findings
+1. **Download QScanner** from the Qualys Portal and place it in `scanner-lambda/qscanner.gz`
+2. **Set your Qualys access token** as an environment variable:
+   ```bash
+   export QUALYS_ACCESS_TOKEN="your-token"
+   ```
+3. **Deploy scanner infrastructure** using the provided Makefile:
+   ```bash
+   make deploy QUALYS_POD=US2 AWS_REGION=us-east-1
+   ```
+4. **Configure QFlow playbooks** for automated response to critical findings
 5. **Integrate with CI/CD** by adding policy evaluation to your build pipelines
 
 For implementation guides and API documentation, visit the [Qualys TotalCloud documentation](https://docs.qualys.com/en/tc/latest/).

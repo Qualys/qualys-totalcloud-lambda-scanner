@@ -9,24 +9,28 @@ variable "stack_name" {
   default     = ""
 }
 
-variable "qualys_pod" {
-  description = "Qualys POD (e.g., US1, US2, EU1)"
+variable "qualys_secret_arn" {
+  description = "ARN of existing Secrets Manager secret containing Qualys credentials (qualys_pod and qualys_access_token)"
   type        = string
 
   validation {
-    condition     = contains(["US1", "US2", "US3", "EU1", "EU2", "IN1", "CA1", "AE1"], var.qualys_pod)
-    error_message = "Qualys POD must be one of: US1, US2, US3, EU1, EU2, IN1, CA1, AE1"
+    condition     = can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]+:secret:.+$", var.qualys_secret_arn))
+    error_message = "Must be a valid Secrets Manager secret ARN"
   }
 }
 
-variable "qualys_access_token" {
-  description = "Qualys Access Token (stored in Secrets Manager)"
+variable "qscanner_layer_arn" {
+  description = "ARN of the QScanner Lambda Layer"
   type        = string
-  sensitive   = true
 }
 
-variable "scanner_image_uri" {
-  description = "ECR URI of the Scanner Lambda container image"
+variable "lambda_code_bucket" {
+  description = "S3 bucket containing Lambda function code"
+  type        = string
+}
+
+variable "lambda_code_key" {
+  description = "S3 key for Lambda function code ZIP"
   type        = string
 }
 

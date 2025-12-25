@@ -15,10 +15,9 @@ provider "aws" {
 module "qualys_scanner" {
   source = "../../modules/scanner-native"
 
-  stack_name          = var.stack_name
-  qualys_pod          = var.qualys_pod
-  qualys_access_token = var.qualys_access_token
-  qscanner_layer_zip  = var.qscanner_layer_zip
+  stack_name        = var.stack_name
+  qualys_secret_arn = var.qualys_secret_arn
+  qscanner_layer_zip = var.qscanner_layer_zip
 
   enable_s3_results        = true
   enable_sns_notifications = true

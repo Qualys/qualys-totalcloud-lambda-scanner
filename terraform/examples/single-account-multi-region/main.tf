@@ -8,33 +8,35 @@ terraform {
   }
 }
 
-# Example: Deploy scanner in multiple regions
+# Example: Deploy scanner in multiple regions using native Terraform module
+#
+# Prerequisites:
+# 1. Create Qualys credentials secret in each region (or replicate from primary)
+# 2. Build and upload QScanner layer ZIP to each region
 
-variable "regions" {
-  description = "List of AWS regions to deploy the scanner"
-  type        = list(string)
-  default     = ["us-east-1", "us-west-2", "eu-west-1"]
-}
-
-variable "qualys_pod" {
-  description = "Qualys POD"
+variable "primary_region" {
+  description = "Primary AWS region"
   type        = string
-  default     = "US2"
+  default     = "us-east-1"
 }
 
-variable "qualys_access_token" {
-  description = "Qualys Access Token"
-  type        = string
-  sensitive   = true
-}
-
-variable "scanner_image_uri_map" {
-  description = "Map of region to Scanner ECR image URI"
+variable "qualys_secret_arn_map" {
+  description = "Map of region to Qualys Secrets Manager secret ARN"
   type        = map(string)
   # Example:
   # {
-  #   "us-east-1" = "123456789012.dkr.ecr.us-east-1.amazonaws.com/qualys-lambda-scanner:latest"
-  #   "us-west-2" = "123456789012.dkr.ecr.us-west-2.amazonaws.com/qualys-lambda-scanner:latest"
+  #   "us-east-1" = "arn:aws:secretsmanager:us-east-1:123456789012:secret:qualys-creds-abc123"
+  #   "us-west-2" = "arn:aws:secretsmanager:us-west-2:123456789012:secret:qualys-creds-def456"
+  # }
+}
+
+variable "qscanner_layer_zip_map" {
+  description = "Map of region to QScanner layer ZIP path"
+  type        = map(string)
+  # Example:
+  # {
+  #   "us-east-1" = "../../../build/qscanner-layer.zip"
+  #   "us-west-2" = "../../../build/qscanner-layer.zip"
   # }
 }
 
@@ -49,75 +51,51 @@ provider "aws" {
   region = "us-west-2"
 }
 
-provider "aws" {
-  alias  = "eu-west-1"
-  region = "eu-west-1"
-}
-
-# Deploy scanner in each region
+# Deploy scanner in us-east-1
 module "scanner_us_east_1" {
-  source = "../../modules/scanner-single-account"
-  count  = contains(var.regions, "us-east-1") ? 1 : 0
+  source = "../../modules/scanner-native"
+  count  = contains(keys(var.qualys_secret_arn_map), "us-east-1") ? 1 : 0
 
   providers = {
     aws = aws.us-east-1
   }
 
-  region              = "us-east-1"
-  qualys_pod          = var.qualys_pod
-  qualys_access_token = var.qualys_access_token
-  scanner_image_uri   = var.scanner_image_uri_map["us-east-1"]
+  stack_name        = "qualys-lambda-scanner"
+  qualys_secret_arn = var.qualys_secret_arn_map["us-east-1"]
+  qscanner_layer_zip = var.qscanner_layer_zip_map["us-east-1"]
 
-  enable_s3_results         = true
-  enable_sns_notifications  = true
+  enable_s3_results        = true
+  enable_sns_notifications = true
+  enable_scan_cache        = true
 
   tags = {
     Environment = "production"
     Application = "qualys-lambda-scanner"
+    Region      = "us-east-1"
   }
 }
 
+# Deploy scanner in us-west-2
 module "scanner_us_west_2" {
-  source = "../../modules/scanner-single-account"
-  count  = contains(var.regions, "us-west-2") ? 1 : 0
+  source = "../../modules/scanner-native"
+  count  = contains(keys(var.qualys_secret_arn_map), "us-west-2") ? 1 : 0
 
   providers = {
     aws = aws.us-west-2
   }
 
-  region              = "us-west-2"
-  qualys_pod          = var.qualys_pod
-  qualys_access_token = var.qualys_access_token
-  scanner_image_uri   = var.scanner_image_uri_map["us-west-2"]
+  stack_name        = "qualys-lambda-scanner"
+  qualys_secret_arn = var.qualys_secret_arn_map["us-west-2"]
+  qscanner_layer_zip = var.qscanner_layer_zip_map["us-west-2"]
 
-  enable_s3_results         = true
-  enable_sns_notifications  = true
-
-  tags = {
-    Environment = "production"
-    Application = "qualys-lambda-scanner"
-  }
-}
-
-module "scanner_eu_west_1" {
-  source = "../../modules/scanner-single-account"
-  count  = contains(var.regions, "eu-west-1") ? 1 : 0
-
-  providers = {
-    aws = aws.eu-west-1
-  }
-
-  region              = "eu-west-1"
-  qualys_pod          = var.qualys_pod
-  qualys_access_token = var.qualys_access_token
-  scanner_image_uri   = var.scanner_image_uri_map["eu-west-1"]
-
-  enable_s3_results         = true
-  enable_sns_notifications  = true
+  enable_s3_results        = true
+  enable_sns_notifications = true
+  enable_scan_cache        = true
 
   tags = {
     Environment = "production"
     Application = "qualys-lambda-scanner"
+    Region      = "us-west-2"
   }
 }
 
@@ -127,6 +105,13 @@ output "scanner_deployments" {
   value = {
     us-east-1 = try(module.scanner_us_east_1[0].scanner_lambda_arn, null)
     us-west-2 = try(module.scanner_us_west_2[0].scanner_lambda_arn, null)
-    eu-west-1 = try(module.scanner_eu_west_1[0].scanner_lambda_arn, null)
+  }
+}
+
+output "scan_results_buckets" {
+  description = "S3 buckets for scan results by region"
+  value = {
+    us-east-1 = try(module.scanner_us_east_1[0].scan_results_bucket_name, null)
+    us-west-2 = try(module.scanner_us_west_2[0].scan_results_bucket_name, null)
   }
 }
