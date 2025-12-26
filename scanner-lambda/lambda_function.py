@@ -522,7 +522,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         qualys_creds = get_qualys_credentials()
 
-        # For cross-account scanning, construct the role ARN from the target account ID
         cross_account_role_arn = None
         if CROSS_ACCOUNT_ROLE_NAME:
             target_account_id = event.get('account', detail.get('userIdentity', {}).get('accountId'))

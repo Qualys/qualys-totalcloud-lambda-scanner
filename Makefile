@@ -4,7 +4,6 @@
        delete-dynamodb delete-dlq delete-sns delete-log-groups delete-alarms delete-eventbridge-rules delete-kms-key \
        clean-all clean-all-hub clean-all-stackset clean-dry-run clean-all-resources
 
-# Variables
 AWS_REGION ?= us-east-1
 STACK_NAME ?= qualys-lambda-scanner
 QUALYS_POD ?= US2
@@ -12,13 +11,10 @@ LAYER_NAME ?= qscanner
 S3_BUCKET ?= $(STACK_NAME)-artifacts-$(shell aws sts get-caller-identity --query Account --output text)
 QUALYS_ACCESS_TOKEN ?= $(shell echo $$QUALYS_ACCESS_TOKEN)
 
-# Tagging variable (optional - defaults to true)
 TAG ?= true
 
-# Cross-account security
 EXTERNAL_ID ?= $(shell openssl rand -hex 16)
 
-# StackSet/Organization variables
 ORG_ID ?= $(shell aws organizations describe-organization --query 'Organization.Id' --output text 2>/dev/null)
 ORG_UNIT_IDS ?=
 ADMIN_ACCOUNT_ID ?= $(shell aws sts get-caller-identity --query Account --output text)
@@ -88,11 +84,7 @@ help:
 	@echo "  make clean-all-hub ORG_UNIT_IDS=ou-xxxx  # Full hub-spoke cleanup"
 	@echo "  make delete-bucket BUCKET_NAME=my-bucket # Delete specific bucket"
 
-# =============================================================================
-# Build Targets
-# =============================================================================
 
-# Build Lambda Layer with QScanner binary
 layer:
 	@echo "Building QScanner Lambda Layer..."
 	@if [ ! -f scanner-lambda/qscanner.gz ]; then \
@@ -107,7 +99,6 @@ layer:
 	@echo "Layer created: build/qscanner-layer.zip"
 	@du -h build/qscanner-layer.zip
 
-# Package Lambda function code
 package:
 	@echo "Packaging Lambda function code..."
 	@mkdir -p build/function build/bulk-scan
@@ -117,7 +108,6 @@ package:
 	@cd build/bulk-scan && zip -r ../bulk-scan.zip .
 	@echo "Function packages created: build/scanner-function.zip, build/bulk-scan.zip"
 
-# Publish Lambda Layer to AWS
 publish-layer: layer
 	@echo "Publishing Lambda Layer to AWS..."
 	@aws lambda publish-layer-version \
@@ -130,19 +120,16 @@ publish-layer: layer
 		--output text > build/layer-arn.txt
 	@echo "Layer published: $$(cat build/layer-arn.txt)"
 
-# Create S3 bucket for Lambda artifacts
 create-bucket:
 	@echo "Creating S3 bucket for artifacts..."
 	@aws s3 mb s3://$(S3_BUCKET) --region $(AWS_REGION) 2>/dev/null || true
 
-# Upload Lambda function code to S3
 upload-function: package create-bucket
 	@echo "Uploading Lambda function code to S3..."
 	@aws s3 cp build/scanner-function.zip s3://$(S3_BUCKET)/scanner-function.zip
 	@aws s3 cp build/bulk-scan.zip s3://$(S3_BUCKET)/bulk-scan.zip
 	@echo "Function code uploaded to s3://$(S3_BUCKET)/"
 
-# Create Secrets Manager secret
 create-secret:
 	@echo "Creating Secrets Manager secret..."
 	@if [ -z "$(QUALYS_ACCESS_TOKEN)" ]; then \
@@ -166,11 +153,7 @@ create-secret:
 	echo $$SECRET_ARN > build/secret-arn.txt
 	@echo "Secret ARN: $$(cat build/secret-arn.txt)"
 
-# =============================================================================
-# Single Account Deployment
-# =============================================================================
 
-# Deploy to single account/region
 deploy: publish-layer upload-function create-secret
 	@echo "Deploying CloudFormation stack..."
 	@aws cloudformation deploy \
@@ -191,7 +174,6 @@ deploy: publish-layer upload-function create-secret
 		--query 'Stacks[0].Outputs' \
 		--region $(AWS_REGION)
 
-# Update Lambda function code only
 update-function: upload-function
 	@echo "Updating Lambda function code..."
 	@aws lambda update-function-code \
@@ -201,7 +183,6 @@ update-function: upload-function
 		--region $(AWS_REGION)
 	@echo "Function code updated"
 
-# Deploy to multiple regions
 deploy-multi-region:
 	@echo "Deploying to multiple regions..."
 	@for region in us-east-1 us-west-2 eu-west-1; do \
@@ -209,7 +190,6 @@ deploy-multi-region:
 		$(MAKE) deploy AWS_REGION=$$region STACK_NAME=$(STACK_NAME)-$$region; \
 	done
 
-# Delete single-account stack
 delete:
 	@echo "Deleting CloudFormation stack..."
 	@aws cloudformation delete-stack \
@@ -221,11 +201,7 @@ delete:
 		--region $(AWS_REGION)
 	@echo "Stack deleted"
 
-# =============================================================================
-# Multi-Account StackSet Deployment
-# =============================================================================
 
-# Create S3 bucket with org-wide read access for artifact distribution
 create-artifacts-bucket:
 	@echo "Creating artifacts bucket for cross-account distribution..."
 	@mkdir -p build
@@ -241,7 +217,6 @@ create-artifacts-bucket:
 	echo $$BUCKET_NAME > build/artifacts-bucket.txt
 	@echo "Artifacts bucket: $$(cat build/artifacts-bucket.txt)"
 
-# Upload Lambda artifacts to S3 for cross-account access
 upload-artifacts: layer package create-artifacts-bucket
 	@echo "Uploading artifacts to S3..."
 	@BUCKET=$$(cat build/artifacts-bucket.txt); \
@@ -250,7 +225,6 @@ upload-artifacts: layer package create-artifacts-bucket
 	aws s3 cp build/bulk-scan.zip s3://$$BUCKET/qualys-lambda-scanner/bulk-scan.zip
 	@echo "Artifacts uploaded to s3://$$BUCKET/qualys-lambda-scanner/"
 
-# Deploy StackSet to organization (each account gets own scanner)
 deploy-stackset: upload-artifacts
 	@echo "Deploying StackSet to organization..."
 	@if [ -z "$(QUALYS_ACCESS_TOKEN)" ]; then \
@@ -296,7 +270,6 @@ deploy-stackset: upload-artifacts
 	@echo "StackSet deployment initiated!"
 	@echo "Monitor: aws cloudformation list-stack-instances --stack-set-name $(STACK_NAME)-stackset --region $(AWS_REGION)"
 
-# Delete StackSet
 delete-stackset:
 	@echo "Deleting StackSet instances..."
 	@if [ -z "$(ORG_UNIT_IDS)" ]; then \
@@ -316,11 +289,7 @@ delete-stackset:
 		--region $(AWS_REGION)
 	@echo "StackSet deleted"
 
-# =============================================================================
-# Centralized Hub-Spoke Deployment
-# =============================================================================
 
-# Deploy hub scanner in security/central account
 deploy-hub: upload-artifacts create-secret
 	@echo "Deploying centralized hub scanner..."
 	@BUCKET=$$(cat build/artifacts-bucket.txt); \
@@ -351,7 +320,6 @@ deploy-hub: upload-artifacts create-secret
 	@echo ""
 	@echo "Next: make deploy-spoke-stackset ORG_UNIT_IDS=ou-xxxx-xxxxxxxx"
 
-# Deploy spoke template via StackSet to member accounts
 deploy-spoke-stackset:
 	@echo "Deploying spoke StackSet to member accounts..."
 	@if [ -z "$(ORG_UNIT_IDS)" ]; then \
@@ -395,7 +363,6 @@ deploy-spoke-stackset:
 	@echo ""
 	@echo "Spoke StackSet deployment initiated!"
 
-# Delete spoke StackSet
 delete-spoke-stackset:
 	@if [ -z "$(ORG_UNIT_IDS)" ]; then \
 		echo "ERROR: ORG_UNIT_IDS required"; \
@@ -413,7 +380,6 @@ delete-spoke-stackset:
 		--region $(AWS_REGION)
 	@echo "Spoke StackSet deleted"
 
-# Delete hub
 delete-hub:
 	@aws cloudformation delete-stack \
 		--stack-name $(STACK_NAME)-hub \
@@ -423,17 +389,11 @@ delete-hub:
 		--region $(AWS_REGION)
 	@echo "Hub deleted"
 
-# =============================================================================
-# Cleanup & Utilities
-# =============================================================================
 
-# Clean local build artifacts only
 clean:
 	@rm -rf build/
 	@echo "Build artifacts cleaned"
 
-# Delete S3 bucket contents and bucket (handles versioned objects)
-# Usage: make delete-bucket BUCKET_NAME=my-bucket
 delete-bucket:
 	@if [ -z "$(BUCKET_NAME)" ]; then \
 		echo "ERROR: BUCKET_NAME required"; \
@@ -458,7 +418,6 @@ delete-bucket:
 	@aws s3 rb s3://$(BUCKET_NAME) --force 2>/dev/null || true
 	@echo "Bucket $(BUCKET_NAME) deleted"
 
-# Delete all S3 buckets created by this stack
 delete-buckets:
 	@echo "Deleting S3 buckets for stack $(STACK_NAME)..."
 	@ACCOUNT_ID=$$(aws sts get-caller-identity --query Account --output text); \
@@ -473,7 +432,6 @@ delete-buckets:
 	done
 	@echo "All buckets cleaned up"
 
-# Delete DynamoDB scan cache table
 delete-dynamodb:
 	@echo "Deleting DynamoDB scan cache table..."
 	@aws dynamodb delete-table \
@@ -482,7 +440,6 @@ delete-dynamodb:
 		echo "Table $(STACK_NAME)-scan-cache deleted" || \
 		echo "Table $(STACK_NAME)-scan-cache not found or already deleted"
 
-# Delete SQS Dead Letter Queue
 delete-dlq:
 	@echo "Deleting SQS Dead Letter Queue..."
 	@QUEUE_URL=$$(aws sqs get-queue-url \
@@ -496,7 +453,6 @@ delete-dlq:
 		echo "Queue $(STACK_NAME)-scanner-dlq not found or already deleted"; \
 	fi
 
-# Delete SNS topic
 delete-sns:
 	@echo "Deleting SNS topic..."
 	@TOPIC_ARN=$$(aws sns list-topics --region $(AWS_REGION) --query "Topics[?contains(TopicArn, '$(STACK_NAME)-scan-notifications')].TopicArn" --output text 2>/dev/null); \
@@ -507,7 +463,6 @@ delete-sns:
 		echo "SNS topic $(STACK_NAME)-scan-notifications not found or already deleted"; \
 	fi
 
-# Delete CloudWatch Log Groups
 delete-log-groups:
 	@echo "Deleting CloudWatch Log Groups..."
 	@for log_group in "/aws/lambda/$(STACK_NAME)-scanner" "/aws/lambda/$(STACK_NAME)-bulk-scan" "/aws/cloudtrail/$(STACK_NAME)"; do \
@@ -519,7 +474,6 @@ delete-log-groups:
 		fi; \
 	done
 
-# Delete CloudWatch Alarms
 delete-alarms:
 	@echo "Deleting CloudWatch Alarms..."
 	@ALARMS=$$(aws cloudwatch describe-alarms \
@@ -536,7 +490,6 @@ delete-alarms:
 		echo "No alarms found with prefix $(STACK_NAME)-"; \
 	fi
 
-# Delete EventBridge Rules
 delete-eventbridge-rules:
 	@echo "Deleting EventBridge Rules..."
 	@for rule in "$(STACK_NAME)-lambda-create" "$(STACK_NAME)-lambda-update-code" "$(STACK_NAME)-lambda-update-config" "$(STACK_NAME)-bulk-scan-schedule"; do \
@@ -551,7 +504,6 @@ delete-eventbridge-rules:
 		fi; \
 	done
 
-# Schedule KMS key for deletion (30-day minimum wait period)
 delete-kms-key:
 	@echo "Scheduling KMS key for deletion..."
 	@KEY_ID=$$(aws kms list-aliases --region $(AWS_REGION) \
@@ -568,7 +520,6 @@ delete-kms-key:
 		echo "KMS key alias/$(STACK_NAME)-scanner not found"; \
 	fi
 
-# Delete artifacts bucket (for StackSet/Hub deployments)
 delete-artifacts-bucket:
 	@echo "Deleting artifacts bucket..."
 	@ACCOUNT_ID=$$(aws sts get-caller-identity --query Account --output text); \
@@ -579,7 +530,6 @@ delete-artifacts-bucket:
 		echo "Bucket $$BUCKET does not exist"; \
 	fi
 
-# Delete Secrets Manager secret
 delete-secret:
 	@echo "Deleting Secrets Manager secret..."
 	@aws secretsmanager delete-secret \
@@ -589,7 +539,6 @@ delete-secret:
 		echo "Secret $(STACK_NAME)-qualys-credentials deleted" || \
 		echo "Secret $(STACK_NAME)-qualys-credentials not found or already deleted"
 
-# Delete all Lambda layer versions
 delete-layers:
 	@echo "Deleting Lambda layer versions for $(LAYER_NAME)..."
 	@VERSIONS=$$(aws lambda list-layer-versions \
@@ -610,10 +559,6 @@ delete-layers:
 		echo "No layer versions found for $(LAYER_NAME)"; \
 	fi
 
-# Complete cleanup for single-account deployment
-# This deletes: stack, buckets, secret, layers, and local build artifacts
-# Also cleans up resources that may have been created before the stack (secret, layer)
-# or that may persist after stack deletion (log groups, orphaned resources)
 clean-all:
 	@echo "=========================================="
 	@echo "COMPLETE CLEANUP - Single Account"
@@ -665,9 +610,6 @@ clean-all:
 	@echo "To verify all resources are cleaned up:"
 	@echo "  make clean-dry-run"
 
-# Complete cleanup for hub-spoke deployment
-# Hub creates: stack, artifacts bucket, secret (in stack), layer (in stack), EventBus
-# Note: Hub stack creates secret internally, but we also delete standalone secret if created separately
 clean-all-hub:
 	@echo "=========================================="
 	@echo "COMPLETE CLEANUP - Hub-Spoke Deployment"
@@ -753,9 +695,6 @@ clean-all-hub:
 	@echo "To verify all resources are cleaned up:"
 	@echo "  make clean-dry-run"
 
-# Complete cleanup for StackSet deployment
-# StackSet creates: stackset, artifacts bucket, layer (uploaded, not published)
-# Member accounts get: stack with secret, layer, DynamoDB, SQS, SNS, etc. (all in stack)
 clean-all-stackset:
 	@echo "=========================================="
 	@echo "COMPLETE CLEANUP - StackSet Deployment"
@@ -799,7 +738,6 @@ clean-all-stackset:
 	@echo "  - Secret: aws secretsmanager delete-secret --secret-id qualys-lambda-scanner-credentials --force-delete-without-recovery"
 	@echo "  - Log Groups: aws logs delete-log-group --log-group-name /aws/lambda/qualys-lambda-scanner"
 
-# Show what would be cleaned up (dry run)
 clean-dry-run:
 	@echo "=========================================="
 	@echo "DRY RUN - Resources that would be deleted"

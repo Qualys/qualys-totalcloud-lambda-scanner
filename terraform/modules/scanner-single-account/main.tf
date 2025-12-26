@@ -12,7 +12,6 @@ locals {
   stack_name = var.stack_name != "" ? var.stack_name : "qualys-lambda-scanner-${var.region}"
 }
 
-# Deploy CloudFormation stack
 resource "aws_cloudformation_stack" "scanner" {
   name = local.stack_name
 
@@ -41,7 +40,6 @@ resource "aws_cloudformation_stack" "scanner" {
   )
 }
 
-# Outputs from CloudFormation stack
 output "scanner_lambda_arn" {
   description = "ARN of the Scanner Lambda function"
   value       = lookup(aws_cloudformation_stack.scanner.outputs, "ScannerLambdaArn", "")

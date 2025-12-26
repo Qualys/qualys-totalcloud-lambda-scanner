@@ -35,7 +35,6 @@ module "qualys_scanner" {
   }
 }
 
-# Outputs
 output "scanner_lambda_arn" {
   description = "ARN of the Scanner Lambda function"
   value       = module.qualys_scanner.scanner_lambda_arn

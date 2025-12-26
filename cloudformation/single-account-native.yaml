@@ -141,7 +141,6 @@ Conditions:
     - !Condition CreateAccessLogging
 
 Resources:
-  # KMS key for encrypting sensitive data (DynamoDB, SQS, SNS, CloudWatch Logs)
   ScannerKMSKey:
     Type: AWS::KMS::Key
     Properties:
@@ -202,7 +201,6 @@ Resources:
       AliasName: !Sub 'alias/${AWS::StackName}-scanner'
       TargetKeyId: !Ref ScannerKMSKey
 
-  # S3 Access Logs Bucket (CIS Benchmark 3.6)
   AccessLogsBucket:
     Type: AWS::S3::Bucket
     Condition: CreateAccessLogging
@@ -369,7 +367,6 @@ Resources:
                 Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
-                # Note: ecr:GetAuthorizationToken requires Resource: "*" per AWS documentation
                 Resource: '*'
               - Sid: ECRRepositoryAccess
                 Effect: Allow
@@ -408,8 +405,6 @@ Resources:
                 Effect: Allow
                 Action:
                   - cloudwatch:PutMetricData
-                # Note: cloudwatch:PutMetricData requires Resource: "*" per AWS documentation
-                # but we restrict to our namespace via condition key
                 Resource: '*'
                 Condition:
                   StringEquals:
@@ -475,7 +470,6 @@ Resources:
       Role: !GetAtt ScannerLambdaRole.Arn
       MemorySize: !Ref ScannerMemorySize
       Timeout: !Ref ScannerTimeout
-      # Reserved concurrency prevents runaway invocations (0 = no limit)
       ReservedConcurrentExecutions: !If [HasReservedConcurrency, !Ref ScannerReservedConcurrency, !Ref 'AWS::NoValue']
       EphemeralStorage:
         Size: !Ref ScannerEphemeralStorage
@@ -483,7 +477,6 @@ Resources:
         - !Ref QScannerLayerArn
       DeadLetterConfig:
         TargetArn: !GetAtt ScannerDeadLetterQueue.Arn
-      # Enable X-Ray tracing for debugging and auditing
       TracingConfig:
         Mode: Active
       Environment:
@@ -685,9 +678,6 @@ Resources:
       EnableLogFileValidation: true
       CloudWatchLogsLogGroupArn: !Sub '${CloudTrailLogGroup.Arn}:*'
       CloudWatchLogsRoleArn: !GetAtt CloudTrailLogsRole.Arn
-      # Use AdvancedEventSelectors to only log Lambda management events
-      # This reduces CloudTrail costs by avoiding ALL management events from all services
-      # Note: CloudTrail doesn't support filtering to specific API calls, only by service
       AdvancedEventSelectors:
         - Name: 'LambdaManagementEvents'
           FieldSelectors:
@@ -726,7 +716,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
-  # CloudWatch Alarms for monitoring scanner health
   ScannerErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Condition: CreateSNSTopic
@@ -809,9 +798,6 @@ Resources:
       AlarmActions:
         - !Ref ScanNotificationsTopic
 
-  # =============================================================================
-  # Bulk Scan Lambda (Optional) - Scans existing functions
-  # =============================================================================
 
   BulkScanLambdaRole:
     Type: AWS::IAM::Role

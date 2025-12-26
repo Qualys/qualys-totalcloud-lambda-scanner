@@ -23,7 +23,6 @@ Parameters:
     Description: 'ARN of the central EventBridge bus in the security account'
 
 Resources:
-  # IAM Role for Scanner Lambda in Hub account to assume
   SpokeAssumeRole:
     Type: AWS::IAM::Role
     Properties:
@@ -44,14 +43,12 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Lambda List - for bulk scan (all regions, scoped to account)
               - Sid: LambdaList
                 Effect: Allow
                 Action:
                   - lambda:ListFunctions
                 Resource: '*'
 
-              # Lambda Read Permissions - all regions, scoped to account
               - Sid: LambdaRead
                 Effect: Allow
                 Action:
@@ -59,7 +56,6 @@ Resources:
                   - lambda:GetFunctionConfiguration
                 Resource: !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:*'
 
-              # Lambda Tag Permission with tag key restriction - all regions
               - Sid: LambdaTag
                 Effect: Allow
                 Action:
@@ -70,14 +66,12 @@ Resources:
                     'aws:TagKeys':
                       - 'QualysScan*'
 
-              # ECR Auth Token - requires Resource: "*" per AWS documentation
               - Sid: ECRAuthToken
                 Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
                 Resource: '*'
 
-              # ECR Repository Access - all regions, scoped to account
               - Sid: ECRRepositoryAccess
                 Effect: Allow
                 Action:
@@ -93,7 +87,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
-  # EventBridge Rule for Lambda Create
   LambdaCreateEventRule:
     Type: AWS::Events::Rule
     Properties:
@@ -115,7 +108,6 @@ Resources:
           Id: CentralEventBus
           RoleArn: !GetAtt EventBridgeForwardRole.Arn
 
-  # EventBridge Rule for Lambda Update Code
   LambdaUpdateCodeEventRule:
     Type: AWS::Events::Rule
     Properties:
@@ -137,7 +129,6 @@ Resources:
           Id: CentralEventBus
           RoleArn: !GetAtt EventBridgeForwardRole.Arn
 
-  # EventBridge Rule for Lambda Update Configuration
   LambdaUpdateConfigEventRule:
     Type: AWS::Events::Rule
     Properties:
@@ -159,7 +150,6 @@ Resources:
           Id: CentralEventBus
           RoleArn: !GetAtt EventBridgeForwardRole.Arn
 
-  # IAM Role for EventBridge to forward events
   EventBridgeForwardRole:
     Type: AWS::IAM::Role
     Properties:
@@ -186,7 +176,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
-  # KMS key for encrypting sensitive data in spoke account
   SpokeKMSKey:
     Type: AWS::KMS::Key
     Properties:
@@ -233,7 +222,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
-  # CloudTrail for EventBridge (if not already enabled)
   CloudTrailLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -318,8 +306,6 @@ Resources:
       KMSKeyId: !Ref SpokeKMSKey
       CloudWatchLogsLogGroupArn: !Sub '${CloudTrailLogGroup.Arn}:*'
       CloudWatchLogsRoleArn: !GetAtt CloudTrailLogsRole.Arn
-      # Use advanced event selectors to only log Lambda management events
-      # This reduces CloudTrail costs by avoiding ALL management events from all services
       AdvancedEventSelectors:
         - Name: 'LambdaManagementEvents'
           FieldSelectors:

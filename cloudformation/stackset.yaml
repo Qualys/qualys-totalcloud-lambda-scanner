@@ -136,7 +136,6 @@ Conditions:
     - !Not [!Equals [!Ref BulkScanSchedule, '']]
 
 Resources:
-  # KMS key for encrypting sensitive data (DynamoDB, SQS, SNS, CloudWatch Logs)
   ScannerKMSKey:
     Type: AWS::KMS::Key
     Properties:
@@ -186,7 +185,6 @@ Resources:
       AliasName: 'alias/qualys-lambda-scanner'
       TargetKeyId: !Ref ScannerKMSKey
 
-  # Secrets Manager Secret for Qualys Credentials
   QualysCredentialsSecret:
     Type: AWS::SecretsManager::Secret
     Properties:
@@ -203,7 +201,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation-StackSet
 
-  # S3 Bucket for Scan Results (Optional)
   ScanResultsBucket:
     Type: AWS::S3::Bucket
     Condition: CreateS3Bucket
@@ -232,7 +229,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation-StackSet
 
-  # SNS Topic for Notifications (Optional)
   ScanNotificationsTopic:
     Type: AWS::SNS::Topic
     Condition: CreateSNSTopic
@@ -246,7 +242,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation-StackSet
 
-  # DynamoDB table for scan caching
   ScanCacheTable:
     Type: AWS::DynamoDB::Table
     Condition: CreateScanCache
@@ -274,7 +269,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation-StackSet
 
-  # Dead Letter Queue for Scanner Lambda
   ScannerDeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
@@ -288,7 +282,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation-StackSet
 
-  # IAM Role for Scanner Lambda
   ScannerLambdaRole:
     Type: AWS::IAM::Role
     Properties:
@@ -307,14 +300,12 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # ECR Auth Token - requires Resource: "*" per AWS documentation
               - Sid: ECRAuthToken
                 Effect: Allow
                 Action:
                   - ecr:GetAuthorizationToken
                 Resource: '*'
 
-              # ECR Repository Access - scoped to account
               - Sid: ECRRepositoryAccess
                 Effect: Allow
                 Action:
@@ -324,7 +315,6 @@ Resources:
                   - ecr:DescribeImages
                 Resource: !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*'
 
-              # Lambda Read Permissions - scoped to account
               - Sid: LambdaRead
                 Effect: Allow
                 Action:
@@ -332,7 +322,6 @@ Resources:
                   - lambda:GetFunctionConfiguration
                 Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
 
-              # Lambda Tag with restriction to QualysScan* tags only
               - Sid: LambdaTag
                 Effect: Allow
                 Action:
@@ -343,21 +332,18 @@ Resources:
                     'aws:TagKeys':
                       - 'QualysScan*'
 
-              # Secrets Manager Permissions
               - Sid: SecretsManagerRead
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource: !Ref QualysCredentialsSecret
 
-              # SQS Dead Letter Queue
               - Sid: SQSDeadLetterQueue
                 Effect: Allow
                 Action:
                   - sqs:SendMessage
                 Resource: !GetAtt ScannerDeadLetterQueue.Arn
 
-              # CloudWatch Metrics - requires Resource: "*" but restricted by namespace condition
               - Sid: CloudWatchMetrics
                 Effect: Allow
                 Action:
@@ -367,7 +353,6 @@ Resources:
                   StringEquals:
                     'cloudwatch:namespace': 'QualysLambdaScanner'
 
-              # KMS Access for encryption/decryption
               - Sid: KMSAccess
                 Effect: Allow
                 Action:
@@ -375,7 +360,6 @@ Resources:
                   - kms:GenerateDataKey
                 Resource: !GetAtt ScannerKMSKey.Arn
 
-              # X-Ray Tracing permissions
               - Sid: XRayTracing
                 Effect: Allow
                 Action:
@@ -383,7 +367,6 @@ Resources:
                   - xray:PutTelemetryRecords
                 Resource: '*'
 
-              # DynamoDB Access (if enabled)
               - !If
                 - CreateScanCache
                 - Sid: DynamoDBAccess
@@ -395,7 +378,6 @@ Resources:
                   Resource: !GetAtt ScanCacheTable.Arn
                 - !Ref AWS::NoValue
 
-              # S3 Permissions (if enabled)
               - !If
                 - CreateS3Bucket
                 - Sid: S3Write
@@ -405,7 +387,6 @@ Resources:
                   Resource: !Sub '${ScanResultsBucket.Arn}/*'
                 - !Ref AWS::NoValue
 
-              # SNS Permissions (if enabled)
               - !If
                 - CreateSNSTopic
                 - Sid: SNSPublish
@@ -421,7 +402,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation-StackSet
 
-  # CloudWatch Log Group for Scanner Lambda
   ScannerLambdaLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -429,7 +409,6 @@ Resources:
       RetentionInDays: 30
       KmsKeyId: !GetAtt ScannerKMSKey.Arn
 
-  # Lambda Layer containing QScanner binary
   QScannerLayer:
     Type: AWS::Lambda::LayerVersion
     Properties:
@@ -445,7 +424,6 @@ Resources:
       CompatibleArchitectures:
         - x86_64
 
-  # Scanner Lambda Function
   ScannerLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -459,7 +437,6 @@ Resources:
       Role: !GetAtt ScannerLambdaRole.Arn
       MemorySize: !Ref ScannerMemorySize
       Timeout: !Ref ScannerTimeout
-      # Reserved concurrency prevents runaway invocations during mass Lambda deployments
       ReservedConcurrentExecutions: !Ref ScannerReservedConcurrency
       EphemeralStorage:
         Size: !Ref ScannerEphemeralStorage
@@ -467,7 +444,6 @@ Resources:
         - !Ref QScannerLayer
       DeadLetterConfig:
         TargetArn: !GetAtt ScannerDeadLetterQueue.Arn
-      # Enable X-Ray tracing for debugging and auditing
       TracingConfig:
         Mode: Active
       Environment:
@@ -486,7 +462,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation-StackSet
 
-  # EventBridge Rule for Lambda Create
   LambdaCreateEventRule:
     Type: AWS::Events::Rule
     Properties:
@@ -507,7 +482,6 @@ Resources:
         - Arn: !GetAtt ScannerLambdaFunction.Arn
           Id: ScannerLambdaTarget
 
-  # EventBridge Rule for Lambda Update Code
   LambdaUpdateCodeEventRule:
     Type: AWS::Events::Rule
     Properties:
@@ -528,7 +502,6 @@ Resources:
         - Arn: !GetAtt ScannerLambdaFunction.Arn
           Id: ScannerLambdaTarget
 
-  # EventBridge Rule for Lambda Update Configuration
   LambdaUpdateConfigEventRule:
     Type: AWS::Events::Rule
     Properties:
@@ -549,7 +522,6 @@ Resources:
         - Arn: !GetAtt ScannerLambdaFunction.Arn
           Id: ScannerLambdaTarget
 
-  # Permission for EventBridge to invoke Lambda (Create)
   LambdaCreateEventPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -558,7 +530,6 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt LambdaCreateEventRule.Arn
 
-  # Permission for EventBridge to invoke Lambda (Update Code)
   LambdaUpdateCodeEventPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -567,7 +538,6 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt LambdaUpdateCodeEventRule.Arn
 
-  # Permission for EventBridge to invoke Lambda (Update Config)
   LambdaUpdateConfigEventPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -576,11 +546,7 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt LambdaUpdateConfigEventRule.Arn
 
-  # =============================================================================
-  # Bulk Scan Lambda (Optional) - Scans existing functions
-  # =============================================================================
 
-  # IAM Role for Bulk Scan Lambda
   BulkScanLambdaRole:
     Type: AWS::IAM::Role
     Condition: CreateBulkScan
@@ -600,13 +566,11 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # List Lambda functions in account
               - Sid: ListLambdaFunctions
                 Effect: Allow
                 Action:
                   - lambda:ListFunctions
                 Resource: '*'
-              # Invoke the scanner Lambda
               - Sid: InvokeScanner
                 Effect: Allow
                 Action:
@@ -618,7 +582,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation-StackSet
 
-  # Bulk Scan Lambda Function
   BulkScanLambdaFunction:
     Type: AWS::Lambda::Function
     Condition: CreateBulkScan
@@ -644,7 +607,6 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation-StackSet
 
-  # CloudWatch Log Group for Bulk Scan Lambda
   BulkScanLambdaLogGroup:
     Type: AWS::Logs::LogGroup
     Condition: CreateBulkScan
@@ -653,7 +615,6 @@ Resources:
       RetentionInDays: 7
       KmsKeyId: !GetAtt ScannerKMSKey.Arn
 
-  # EventBridge Rule for scheduled bulk scans (optional)
   BulkScanScheduleRule:
     Type: AWS::Events::Rule
     Condition: CreateBulkScanSchedule
@@ -667,7 +628,6 @@ Resources:
           Id: BulkScanTarget
           Input: '{}'
 
-  # Permission for EventBridge to invoke Bulk Scan Lambda
   BulkScanSchedulePermission:
     Type: AWS::Lambda::Permission
     Condition: CreateBulkScanSchedule
@@ -677,7 +637,6 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt BulkScanScheduleRule.Arn
 
-  # CloudWatch Alarms for monitoring scanner health
   ScannerErrorsAlarm:
     Type: AWS::CloudWatch::Alarm
     Condition: CreateSNSTopic

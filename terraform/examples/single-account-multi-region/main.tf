@@ -8,11 +8,6 @@ terraform {
   }
 }
 
-# Example: Deploy scanner in multiple regions using native Terraform module
-#
-# Prerequisites:
-# 1. Create Qualys credentials secret in each region (or replicate from primary)
-# 2. Build and upload QScanner layer ZIP to each region
 
 variable "primary_region" {
   description = "Primary AWS region"
@@ -23,24 +18,13 @@ variable "primary_region" {
 variable "qualys_secret_arn_map" {
   description = "Map of region to Qualys Secrets Manager secret ARN"
   type        = map(string)
-  # Example:
-  # {
-  #   "us-east-1" = "arn:aws:secretsmanager:us-east-1:123456789012:secret:qualys-creds-abc123"
-  #   "us-west-2" = "arn:aws:secretsmanager:us-west-2:123456789012:secret:qualys-creds-def456"
-  # }
 }
 
 variable "qscanner_layer_zip_map" {
   description = "Map of region to QScanner layer ZIP path"
   type        = map(string)
-  # Example:
-  # {
-  #   "us-east-1" = "../../../build/qscanner-layer.zip"
-  #   "us-west-2" = "../../../build/qscanner-layer.zip"
-  # }
 }
 
-# Configure providers for each region
 provider "aws" {
   alias  = "us-east-1"
   region = "us-east-1"
@@ -51,7 +35,6 @@ provider "aws" {
   region = "us-west-2"
 }
 
-# Deploy scanner in us-east-1
 module "scanner_us_east_1" {
   source = "../../modules/scanner-native"
   count  = contains(keys(var.qualys_secret_arn_map), "us-east-1") ? 1 : 0
@@ -75,7 +58,6 @@ module "scanner_us_east_1" {
   }
 }
 
-# Deploy scanner in us-west-2
 module "scanner_us_west_2" {
   source = "../../modules/scanner-native"
   count  = contains(keys(var.qualys_secret_arn_map), "us-west-2") ? 1 : 0
@@ -99,7 +81,6 @@ module "scanner_us_west_2" {
   }
 }
 
-# Outputs
 output "scanner_deployments" {
   description = "Scanner Lambda ARNs by region"
   value = {

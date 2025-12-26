@@ -10,11 +10,9 @@ from typing import List, Dict, Any, Optional, Tuple
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Clients
 lambda_client = boto3.client('lambda')
 sts_client = boto3.client('sts')
 
-# Environment variables
 SCANNER_FUNCTION_NAME = os.environ.get('SCANNER_FUNCTION_NAME', '')
 CROSS_ACCOUNT_ROLE_NAME = os.environ.get('CROSS_ACCOUNT_ROLE_NAME', '')
 SCANNER_EXTERNAL_ID = os.environ.get('SCANNER_EXTERNAL_ID', '')
@@ -41,7 +39,6 @@ except ValueError:
 CURRENT_REGION = os.environ.get('AWS_REGION', 'us-east-1')
 DEFAULT_REGIONS = [r.strip() for r in os.environ.get('DEFAULT_REGIONS', '').split(',') if r.strip()]
 
-# Validation patterns
 ACCOUNT_ID_PATTERN = re.compile(r'^\d{12}$')
 REGION_PATTERN = re.compile(r'^[a-z]{2}-[a-z]+-\d+$')
 
@@ -117,7 +114,6 @@ def list_all_functions(client: boto3.client, exclude_patterns: list) -> List[Dic
         for func in page.get('Functions', []):
             function_name = func.get('FunctionName', '')
 
-            # Skip excluded functions
             if should_exclude(function_name, exclude_patterns):
                 logger.debug(f"Excluding function: {function_name}")
                 continue
@@ -140,7 +136,6 @@ def invoke_scanner(func: Dict[str, Any], source_account: str) -> Tuple[bool, str
         logger.error("SCANNER_FUNCTION_NAME not configured")
         return False, function_name
 
-    # Create a synthetic CloudTrail-like event for the scanner
     scan_event = {
         'source': 'qualys.bulk-scan',
         'detail-type': 'Bulk Scan Request',
@@ -180,13 +175,11 @@ def invoke_batch_parallel(functions: List[Dict[str, Any]], account_id: str) -> T
     failed = 0
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Submit all tasks
         future_to_func = {
             executor.submit(invoke_scanner, func, account_id): func
             for func in functions
         }
 
-        # Collect results as they complete
         for future in as_completed(future_to_func):
             try:
                 success, func_name = future.result()
@@ -213,7 +206,6 @@ def process_region(account_id: str, region: str, current_account: str,
     }
 
     try:
-        # Get appropriate Lambda client for this account/region
         if account_id == current_account:
             if region == CURRENT_REGION:
                 list_client = lambda_client
@@ -227,7 +219,6 @@ def process_region(account_id: str, region: str, current_account: str,
             result['error'] = 'Could not create Lambda client'
             return result
 
-        # List all functions in this region
         functions = list_all_functions(list_client, exclude_patterns)
         function_count = len(functions)
         result['functions'] = function_count
@@ -242,7 +233,6 @@ def process_region(account_id: str, region: str, current_account: str,
             result['status'] = 'success'
             return result
 
-        # Invoke scanner in parallel batches
         invoked = 0
         failed = 0
 
@@ -257,7 +247,6 @@ def process_region(account_id: str, region: str, current_account: str,
             invoked += batch_invoked
             failed += batch_failed
 
-            # Pause between batches to avoid throttling
             if i + BATCH_SIZE < len(functions) and INVOCATION_DELAY_MS > 0:
                 pause_seconds = (INVOCATION_DELAY_MS * BATCH_SIZE) / 1000.0
                 time.sleep(pause_seconds)
@@ -277,20 +266,17 @@ def process_region(account_id: str, region: str, current_account: str,
 def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
     logger.info(f"Bulk scan triggered with event: {json.dumps(event)}")
 
-    # Validate scanner function is configured
     if not SCANNER_FUNCTION_NAME:
         return {
             'statusCode': 500,
             'body': {'error': 'SCANNER_FUNCTION_NAME not configured'}
         }
 
-    # Parse event
     account_ids = event.get('account_ids', [])
     event_regions = event.get('regions', [])
     dry_run = event.get('dry_run', False)
     additional_excludes = event.get('exclude_patterns', [])
 
-    # Determine regions to scan
     if event_regions:
         regions = [r.strip() for r in event_regions if r.strip()]
     elif DEFAULT_REGIONS:
@@ -298,7 +284,6 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
     else:
         regions = [CURRENT_REGION]
 
-    # Validate regions
     invalid_regions = [r for r in regions if not validate_region(r)]
     if invalid_regions:
         return {
@@ -306,7 +291,6 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
             'body': {'error': f'Invalid regions: {invalid_regions}'}
         }
 
-    # Create local exclude patterns list (avoid modifying global for thread safety)
     exclude_patterns = list(EXCLUDE_PATTERNS) + additional_excludes
 
     results = {
@@ -319,10 +303,8 @@ def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
         'details': []
     }
 
-    # Get current account ID
     current_account = sts_client.get_caller_identity()['Account']
 
-    # If no account IDs specified, scan current account
     if not account_ids:
         account_ids = [current_account]
 

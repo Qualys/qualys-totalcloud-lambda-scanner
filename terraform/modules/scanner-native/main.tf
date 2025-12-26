@@ -17,7 +17,6 @@ locals {
   layer_name    = "${var.stack_name}-qscanner"
 }
 
-# KMS key for encrypting sensitive data (DynamoDB, SQS, SNS, CloudWatch Logs)
 resource "aws_kms_key" "scanner" {
   description             = "KMS key for Qualys Lambda Scanner encryption"
   deletion_window_in_days = 30
@@ -99,7 +98,6 @@ resource "aws_kms_alias" "scanner" {
   target_key_id = aws_kms_key.scanner.key_id
 }
 
-# S3 Access Logs Bucket (CIS Benchmark 3.6)
 resource "aws_s3_bucket" "access_logs" {
   count = var.enable_access_logging ? 1 : 0
 
@@ -205,7 +203,6 @@ resource "aws_s3_bucket_policy" "access_logs" {
   })
 }
 
-# Create Lambda Layer for QScanner binary
 resource "aws_lambda_layer_version" "qscanner" {
   filename            = var.qscanner_layer_zip
   layer_name          = local.layer_name
@@ -217,18 +214,13 @@ resource "aws_lambda_layer_version" "qscanner" {
   }
 }
 
-# Package Lambda function code
 data "archive_file" "lambda_function" {
   type        = "zip"
   source_file = "${path.module}/../../../scanner-lambda/lambda_function.py"
   output_path = "${path.module}/builds/lambda_function.zip"
 }
 
-# Qualys credentials are stored in an externally-created Secrets Manager secret
-# This follows security best practice - secrets should not be created in IaC
-# to avoid storing sensitive values in state files
 
-# DynamoDB table for scan caching
 resource "aws_dynamodb_table" "scan_cache" {
   count = var.enable_scan_cache ? 1 : 0
 
@@ -246,13 +238,11 @@ resource "aws_dynamodb_table" "scan_cache" {
     enabled        = true
   }
 
-  # Enable server-side encryption with KMS CMK
   server_side_encryption {
     enabled     = true
     kms_key_arn = aws_kms_key.scanner.arn
   }
 
-  # Enable point-in-time recovery for enterprise compliance
   point_in_time_recovery {
     enabled = true
   }
@@ -266,7 +256,6 @@ resource "aws_dynamodb_table" "scan_cache" {
   )
 }
 
-# S3 bucket for scan results
 resource "aws_s3_bucket" "scan_results" {
   count = var.enable_s3_results ? 1 : 0
 
@@ -333,7 +322,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "scan_results" {
   }
 }
 
-# S3 Access Logging for scan results bucket (CIS Benchmark 3.6)
 resource "aws_s3_bucket_logging" "scan_results" {
   count = var.enable_s3_results && var.enable_access_logging ? 1 : 0
 
@@ -343,7 +331,6 @@ resource "aws_s3_bucket_logging" "scan_results" {
   target_prefix = "scan-results/"
 }
 
-# Bucket policy to enforce HTTPS transport for scan results
 resource "aws_s3_bucket_policy" "scan_results" {
   count  = var.enable_s3_results ? 1 : 0
   bucket = aws_s3_bucket.scan_results[0].id
@@ -382,7 +369,6 @@ resource "aws_s3_bucket_policy" "scan_results" {
   })
 }
 
-# SNS topic for scan notifications
 resource "aws_sns_topic" "scan_notifications" {
   count = var.enable_sns_notifications ? 1 : 0
 
@@ -399,7 +385,6 @@ resource "aws_sns_topic" "scan_notifications" {
   )
 }
 
-# CloudWatch Log Group for Scanner Lambda
 resource "aws_cloudwatch_log_group" "scanner_lambda" {
   name              = "/aws/lambda/${local.function_name}"
   retention_in_days = 30
@@ -414,7 +399,6 @@ resource "aws_cloudwatch_log_group" "scanner_lambda" {
   )
 }
 
-# IAM Role for Scanner Lambda
 resource "aws_iam_role" "scanner_lambda" {
   name = "${var.stack_name}-scanner-lambda-role"
 
@@ -440,7 +424,6 @@ resource "aws_iam_role" "scanner_lambda" {
   )
 }
 
-# IAM Policy for Scanner Lambda
 resource "aws_iam_role_policy" "scanner_lambda" {
   name = "ScannerLambdaPolicy"
   role = aws_iam_role.scanner_lambda.id
@@ -454,7 +437,6 @@ resource "aws_iam_role_policy" "scanner_lambda" {
         Action = [
           "ecr:GetAuthorizationToken"
         ]
-        # Note: ecr:GetAuthorizationToken requires Resource: "*" per AWS documentation
         Resource = "*"
       },
       {
@@ -478,7 +460,6 @@ resource "aws_iam_role_policy" "scanner_lambda" {
         Resource = "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:*"
       },
       {
-        # Separate statement for TagResource to potentially restrict in future
         Sid    = "LambdaTag"
         Effect = "Allow"
         Action = [
@@ -513,8 +494,6 @@ resource "aws_iam_role_policy" "scanner_lambda" {
         Action = [
           "cloudwatch:PutMetricData"
         ]
-        # Note: cloudwatch:PutMetricData requires Resource: "*" per AWS documentation
-        # but we restrict to our namespace via condition key
         Resource = "*"
         Condition = {
           StringEquals = {
@@ -523,7 +502,6 @@ resource "aws_iam_role_policy" "scanner_lambda" {
         }
       },
       {
-        # KMS permissions for encrypting/decrypting data
         Sid    = "KMSAccess"
         Effect = "Allow"
         Action = [
@@ -533,7 +511,6 @@ resource "aws_iam_role_policy" "scanner_lambda" {
         Resource = aws_kms_key.scanner.arn
       },
       {
-        # X-Ray tracing permissions
         Sid    = "XRayTracing"
         Effect = "Allow"
         Action = [
@@ -573,22 +550,18 @@ resource "aws_iam_role_policy" "scanner_lambda" {
   })
 }
 
-# Attach AWS managed policy for basic Lambda execution
 resource "aws_iam_role_policy_attachment" "scanner_lambda_basic" {
   role       = aws_iam_role.scanner_lambda.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# SQS Dead Letter Queue for Scanner Lambda
 resource "aws_sqs_queue" "scanner_dlq" {
   name                      = "${var.stack_name}-scanner-dlq"
   message_retention_seconds = 1209600 # 14 days
 
-  # Enable KMS encryption for messages at rest
   kms_master_key_id                 = aws_kms_key.scanner.id
   kms_data_key_reuse_period_seconds = 300
 
-  # Enable server-side encryption
   sqs_managed_sse_enabled = false # Using KMS instead
 
   tags = merge(
@@ -600,7 +573,6 @@ resource "aws_sqs_queue" "scanner_dlq" {
   )
 }
 
-# Scanner Lambda Function
 resource "aws_lambda_function" "scanner" {
   filename         = data.archive_file.lambda_function.output_path
   function_name    = local.function_name
@@ -611,8 +583,6 @@ resource "aws_lambda_function" "scanner" {
   memory_size      = var.scanner_memory_size
   timeout          = var.scanner_timeout
 
-  # Reserved concurrency prevents runaway invocations during mass Lambda deployments
-  # Set to 10 to prevent overwhelming the scanner while still allowing parallelism
   reserved_concurrent_executions = var.scanner_reserved_concurrency
 
   layers = [aws_lambda_layer_version.qscanner.arn]
@@ -625,7 +595,6 @@ resource "aws_lambda_function" "scanner" {
     size = var.scanner_ephemeral_storage
   }
 
-  # Enable X-Ray tracing for debugging and auditing
   tracing_config {
     mode = "Active"
   }
@@ -658,7 +627,6 @@ resource "aws_lambda_function" "scanner" {
   )
 }
 
-# CloudTrail S3 bucket
 resource "aws_s3_bucket" "cloudtrail" {
   bucket = "${var.stack_name}-cloudtrail-${data.aws_caller_identity.current.account_id}"
 
@@ -688,7 +656,6 @@ resource "aws_s3_bucket_public_access_block" "cloudtrail" {
   restrict_public_buckets = true
 }
 
-# Enable server-side encryption for CloudTrail bucket
 resource "aws_s3_bucket_server_side_encryption_configuration" "cloudtrail" {
   bucket = aws_s3_bucket.cloudtrail.id
 
@@ -714,7 +681,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "cloudtrail" {
   }
 }
 
-# S3 Access Logging for CloudTrail bucket (CIS Benchmark 3.6)
 resource "aws_s3_bucket_logging" "cloudtrail" {
   count = var.enable_access_logging ? 1 : 0
 
@@ -784,7 +750,6 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
   })
 }
 
-# CloudWatch Log Group for CloudTrail
 resource "aws_cloudwatch_log_group" "cloudtrail" {
   name              = "/aws/cloudtrail/${var.stack_name}"
   retention_in_days = 7
@@ -799,7 +764,6 @@ resource "aws_cloudwatch_log_group" "cloudtrail" {
   )
 }
 
-# IAM Role for CloudTrail to write to CloudWatch Logs
 resource "aws_iam_role" "cloudtrail_logs" {
   name = "${var.stack_name}-cloudtrail-logs-role"
 
@@ -844,7 +808,6 @@ resource "aws_iam_role_policy" "cloudtrail_logs" {
   })
 }
 
-# CloudTrail
 resource "aws_cloudtrail" "main" {
   name                          = "${var.stack_name}-trail"
   s3_bucket_name                = aws_s3_bucket.cloudtrail.id
@@ -854,8 +817,6 @@ resource "aws_cloudtrail" "main" {
   cloud_watch_logs_group_arn    = "${aws_cloudwatch_log_group.cloudtrail.arn}:*"
   cloud_watch_logs_role_arn     = aws_iam_role.cloudtrail_logs.arn
 
-  # Use advanced event selectors to only log Lambda management events
-  # This reduces CloudTrail costs by avoiding ALL management events from all services
   advanced_event_selector {
     name = "LambdaManagementEvents"
 
@@ -883,9 +844,6 @@ resource "aws_cloudtrail" "main" {
   )
 }
 
-# EventBridge Rules
-# Note: Self-scan prevention is handled at the code level in lambda_function.py
-# This provides more reliable filtering than EventBridge pattern matching
 resource "aws_cloudwatch_event_rule" "lambda_create" {
   name        = "${var.stack_name}-lambda-create"
   description = "Trigger scanner when Lambda function is created"
@@ -994,7 +952,6 @@ resource "aws_lambda_permission" "lambda_update_config" {
   source_arn    = aws_cloudwatch_event_rule.lambda_update_config.arn
 }
 
-# CloudWatch Alarms for monitoring scanner health
 resource "aws_cloudwatch_metric_alarm" "scanner_errors" {
   alarm_name          = "${var.stack_name}-scanner-errors"
   comparison_operator = "GreaterThanThreshold"
@@ -1103,6 +1060,5 @@ resource "aws_cloudwatch_metric_alarm" "scanner_duration" {
   )
 }
 
-# Data sources
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
