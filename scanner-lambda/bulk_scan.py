@@ -161,7 +161,7 @@ def invoke_scanner(func: Dict[str, Any], source_account: str) -> Tuple[bool, str
     try:
         lambda_client.invoke(
             FunctionName=SCANNER_FUNCTION_NAME,
-            InvocationType='Event',  # Async invocation
+            InvocationType='Event',
             Payload=json.dumps(scan_event)
         )
         return True, function_name

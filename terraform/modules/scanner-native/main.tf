@@ -557,12 +557,12 @@ resource "aws_iam_role_policy_attachment" "scanner_lambda_basic" {
 
 resource "aws_sqs_queue" "scanner_dlq" {
   name                      = "${var.stack_name}-scanner-dlq"
-  message_retention_seconds = 1209600 # 14 days
+  message_retention_seconds = 1209600
 
   kms_master_key_id                 = aws_kms_key.scanner.id
   kms_data_key_reuse_period_seconds = 300
 
-  sqs_managed_sse_enabled = false # Using KMS instead
+  sqs_managed_sse_enabled = false
 
   tags = merge(
     var.tags,
@@ -1041,7 +1041,7 @@ resource "aws_cloudwatch_metric_alarm" "scanner_duration" {
   namespace           = "AWS/Lambda"
   period              = "300"
   statistic           = "Average"
-  threshold           = tostring(var.scanner_timeout * 1000 * 0.8) # 80% of timeout
+  threshold           = tostring(var.scanner_timeout * 1000 * 0.8)
   alarm_description   = "Scanner Lambda approaching timeout threshold"
   treat_missing_data  = "notBreaching"
 

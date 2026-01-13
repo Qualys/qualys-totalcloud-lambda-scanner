@@ -1,4 +1,4 @@
-.PHONY: help layer package deploy deploy-multi-region clean deploy-stackset deploy-hub deploy-spoke \
+.PHONY: help update-qscanner layer package deploy deploy-multi-region clean deploy-stackset deploy-hub deploy-spoke \
        delete delete-hub delete-stackset delete-spoke-stackset \
        delete-bucket delete-buckets delete-artifacts-bucket delete-secret delete-layers \
        delete-dynamodb delete-dlq delete-sns delete-log-groups delete-alarms delete-eventbridge-rules delete-kms-key \
@@ -39,6 +39,7 @@ help:
 	@echo "  delete-spoke-stackset - Delete spoke StackSet"
 	@echo ""
 	@echo "=== Build ==="
+	@echo "  update-qscanner      - Update qscanner.gz from downloaded Linux binary"
 	@echo "  layer                - Build QScanner Lambda Layer"
 	@echo "  package              - Package Lambda function code"
 	@echo ""
@@ -64,13 +65,15 @@ help:
 	@echo "  delete-kms-key       - Schedule KMS key for deletion"
 	@echo ""
 	@echo "Variables:"
-	@echo "  AWS_REGION           - AWS region (default: us-east-1)"
-	@echo "  STACK_NAME           - CloudFormation stack name (default: qualys-lambda-scanner)"
-	@echo "  QUALYS_POD           - Qualys POD (default: US2)"
-	@echo "  QUALYS_ACCESS_TOKEN  - Qualys access token (required, or set env var)"
-	@echo "  ORG_UNIT_IDS         - Comma-separated OU IDs for StackSet deployment"
-	@echo "  TAG                  - Enable Lambda resource tagging (true/false, default: true)"
-	@echo "  LAYER_NAME           - Lambda layer name (default: qscanner)"
+	@echo "  AWS_REGION              - AWS region (default: us-east-1)"
+	@echo "  STACK_NAME              - CloudFormation stack name (default: qualys-lambda-scanner)"
+	@echo "  QUALYS_POD              - Qualys POD (default: US2)"
+	@echo "  QUALYS_ACCESS_TOKEN     - Qualys access token (required, or set env var)"
+	@echo "  ORG_UNIT_IDS            - Comma-separated OU IDs for StackSet deployment"
+	@echo "  TAG                     - Enable Lambda resource tagging (true/false, default: true)"
+	@echo "  LAYER_NAME              - Lambda layer name (default: qscanner)"
+	@echo "  QSCANNER_BINARIES_DIR   - Directory with downloaded qscanner binaries"
+	@echo "                            (default: ~/git_base/infra/binaries)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make deploy QUALYS_POD=US2 AWS_REGION=us-east-1"
@@ -84,6 +87,36 @@ help:
 	@echo "  make clean-all-hub ORG_UNIT_IDS=ou-xxxx  # Full hub-spoke cleanup"
 	@echo "  make delete-bucket BUCKET_NAME=my-bucket # Delete specific bucket"
 
+
+QSCANNER_BINARIES_DIR ?= $(HOME)/git_base/infra/binaries
+
+update-qscanner:
+	@echo "Updating QScanner binary for Lambda..."
+	@TARBALL=$$(ls -t $(QSCANNER_BINARIES_DIR)/qscanner-*.linux-amd64.tar.gz 2>/dev/null | head -1); \
+	if [ -z "$$TARBALL" ]; then \
+		echo "ERROR: No Linux binary found in $(QSCANNER_BINARIES_DIR)"; \
+		echo ""; \
+		echo "To download the latest QScanner:"; \
+		echo "  1. Run on a Linux system: qscanner update --destination $(QSCANNER_BINARIES_DIR)"; \
+		echo "  2. Or download manually from Qualys and place in $(QSCANNER_BINARIES_DIR)"; \
+		echo ""; \
+		echo "Expected filename pattern: qscanner-*.linux-amd64.tar.gz"; \
+		exit 1; \
+	fi; \
+	echo "Found: $$TARBALL"; \
+	VERSION=$$(basename "$$TARBALL" | sed 's/qscanner-\(.*\)\.linux-amd64\.tar\.gz/\1/'); \
+	echo "Version: $$VERSION"; \
+	tar -xzf "$$TARBALL" -C /tmp qscanner; \
+	gzip -c /tmp/qscanner > scanner-lambda/qscanner.gz; \
+	rm /tmp/qscanner; \
+	echo ""; \
+	echo "Updated scanner-lambda/qscanner.gz ($$VERSION)"; \
+	ls -lh scanner-lambda/qscanner.gz; \
+	echo ""; \
+	echo "Next steps:"; \
+	echo "  make layer          # Build the layer zip"; \
+	echo "  make publish-layer  # Publish to AWS"; \
+	echo "  make deploy         # Full redeploy"
 
 layer:
 	@echo "Building QScanner Lambda Layer..."
@@ -311,7 +344,6 @@ deploy-hub: upload-artifacts create-secret
 		--query 'Stacks[0].Outputs' \
 		--region $(AWS_REGION) \
 		--output table
-	@# Save outputs for spoke deployment
 	@aws cloudformation describe-stacks \
 		--stack-name $(STACK_NAME)-hub \
 		--query "Stacks[0].Outputs[?OutputKey=='CentralEventBusArn'].OutputValue" \
