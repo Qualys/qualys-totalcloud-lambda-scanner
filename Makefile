@@ -2,7 +2,9 @@
        delete delete-hub delete-stackset delete-spoke-stackset \
        delete-bucket delete-buckets delete-artifacts-bucket delete-secret delete-layers \
        delete-dynamodb delete-dlq delete-sns delete-log-groups delete-alarms delete-eventbridge-rules delete-kms-key \
-       clean-all clean-all-hub clean-all-stackset clean-dry-run clean-all-resources
+       clean-all clean-all-hub clean-all-stackset clean-dry-run clean-all-resources \
+       test test-unit test-integration test-smoke test-bulk-dry-run test-coverage \
+       validate validate-config validate-cfn config-init config-show install-dev
 
 AWS_REGION ?= us-east-1
 STACK_NAME ?= qualys-lambda-scanner
@@ -12,6 +14,9 @@ S3_BUCKET ?= $(STACK_NAME)-artifacts-$(shell aws sts get-caller-identity --query
 QUALYS_ACCESS_TOKEN ?= $(shell echo $$QUALYS_ACCESS_TOKEN)
 
 TAG ?= true
+
+# Multi-region support - comma-separated list of regions
+REGIONS ?= $(AWS_REGION)
 
 EXTERNAL_ID ?= $(shell openssl rand -hex 16)
 
@@ -81,11 +86,33 @@ help:
 	@echo "  make deploy-hub"
 	@echo "  make deploy-stackset ORG_UNIT_IDS=ou-xxxx"
 	@echo ""
+	@echo "=== Testing ==="
+	@echo "  test               - Run all unit tests (no AWS required)"
+	@echo "  test-unit          - Run unit tests only"
+	@echo "  test-integration   - Run integration tests (requires AWS)"
+	@echo "  test-smoke         - Smoke test with real Lambda deployment"
+	@echo "  test-bulk-dry-run  - Test bulk scan in dry-run mode"
+	@echo "  test-coverage      - Run tests with coverage report"
+	@echo ""
+	@echo "=== Validation ==="
+	@echo "  validate           - Run pre-flight validation before deploy"
+	@echo "  validate-cfn       - Lint CloudFormation templates"
+	@echo ""
+	@echo "=== Configuration ==="
+	@echo "  config-init        - Create .qualys-scanner.yml from example"
+	@echo "  config-show        - Display current configuration"
+	@echo "  install-dev        - Install development dependencies"
+	@echo ""
 	@echo "Cleanup Examples:"
 	@echo "  make clean-dry-run                    # Preview what will be deleted"
 	@echo "  make clean-all                        # Full cleanup (single-account)"
 	@echo "  make clean-all-hub ORG_UNIT_IDS=ou-xxxx  # Full hub-spoke cleanup"
 	@echo "  make delete-bucket BUCKET_NAME=my-bucket # Delete specific bucket"
+	@echo ""
+	@echo "Testing Examples:"
+	@echo "  make test                             # Run all unit tests"
+	@echo "  make validate                         # Pre-flight checks"
+	@echo "  make deploy-stackset REGIONS=us-east-1,us-west-2 ORG_UNIT_IDS=ou-xxx"
 
 
 QSCANNER_BINARIES_DIR ?= $(HOME)/git_base/infra/binaries
@@ -293,12 +320,16 @@ deploy-stackset: upload-artifacts
 			--capabilities CAPABILITY_NAMED_IAM \
 			--region $(AWS_REGION)
 	@echo "Creating stack instances in OUs: $(ORG_UNIT_IDS)..."
-	@aws cloudformation create-stack-instances \
-		--stack-set-name $(STACK_NAME)-stackset \
-		--deployment-targets OrganizationalUnitIds=$(ORG_UNIT_IDS) \
-		--regions $(AWS_REGION) \
-		--operation-preferences FailureTolerancePercentage=10,MaxConcurrentPercentage=25 \
-		--region $(AWS_REGION)
+	@echo "Regions: $(REGIONS)"
+	@for region in $$(echo "$(REGIONS)" | tr ',' ' '); do \
+		echo "Creating instances in $$region..."; \
+		aws cloudformation create-stack-instances \
+			--stack-set-name $(STACK_NAME)-stackset \
+			--deployment-targets OrganizationalUnitIds=$(ORG_UNIT_IDS) \
+			--regions $$region \
+			--operation-preferences FailureTolerancePercentage=10,MaxConcurrentPercentage=25 \
+			--region $(AWS_REGION) || true; \
+	done
 	@echo ""
 	@echo "StackSet deployment initiated!"
 	@echo "Monitor: aws cloudformation list-stack-instances --stack-set-name $(STACK_NAME)-stackset --region $(AWS_REGION)"
@@ -917,3 +948,102 @@ clean-dry-run:
 	@echo "  make clean-all                              # Single account deployment"
 	@echo "  make clean-all-hub ORG_UNIT_IDS=ou-xxx      # Hub-spoke deployment"
 	@echo "  make clean-all-stackset ORG_UNIT_IDS=ou-xxx # StackSet deployment"
+
+# =============================================================================
+# Testing Targets
+# =============================================================================
+
+install-dev:
+	@echo "Installing development dependencies..."
+	pip3 install -e ".[dev]"
+	@echo "Development dependencies installed"
+
+test: test-unit
+	@echo "All tests completed"
+
+test-unit:
+	@echo "Running unit tests..."
+	python3 -m pytest tests/unit -v -m unit --tb=short
+
+test-integration:
+	@echo "Running integration tests (requires AWS credentials)..."
+	python3 -m pytest tests/integration -v -m integration --tb=short
+
+test-smoke:
+	@echo "Running smoke test..."
+	python3 -m pytest tests/integration/test_smoke.py -v -m smoke --tb=short
+
+test-bulk-dry-run:
+	@echo "Testing bulk scan in dry-run mode..."
+	@if [ -z "$(SCANNER_FUNCTION_NAME)" ]; then \
+		SCANNER_FUNCTION_NAME=$$(aws cloudformation describe-stacks \
+			--stack-name $(STACK_NAME) \
+			--query "Stacks[0].Outputs[?OutputKey=='BulkScanLambdaName'].OutputValue" \
+			--output text 2>/dev/null); \
+	fi; \
+	if [ -z "$$SCANNER_FUNCTION_NAME" ] || [ "$$SCANNER_FUNCTION_NAME" = "None" ]; then \
+		echo "ERROR: Could not find bulk scan function. Deploy first or set SCANNER_FUNCTION_NAME"; \
+		exit 1; \
+	fi; \
+	echo "Invoking bulk scan with dry_run=true..."; \
+	aws lambda invoke \
+		--function-name $$SCANNER_FUNCTION_NAME \
+		--payload '{"dry_run": true, "regions": ["$(AWS_REGION)"]}' \
+		--cli-binary-format raw-in-base64-out \
+		/tmp/bulk-scan-dry-run-output.json; \
+	echo ""; \
+	echo "Results:"; \
+	cat /tmp/bulk-scan-dry-run-output.json | python3 -m json.tool
+
+test-coverage:
+	@echo "Running tests with coverage..."
+	python3 -m pytest tests/unit -v --cov=scanner-lambda --cov-report=term-missing --cov-report=html
+	@echo "Coverage report generated in htmlcov/"
+
+# =============================================================================
+# Validation Targets
+# =============================================================================
+
+validate:
+	@echo "Running pre-flight validation..."
+	@python3 scripts/validate.py --type $(if $(ORG_UNIT_IDS),stackset,single-account)
+
+validate-cfn:
+	@echo "Linting CloudFormation templates..."
+	@if command -v cfn-lint >/dev/null 2>&1; then \
+		cfn-lint cloudformation/*.yaml; \
+		echo "All templates passed validation"; \
+	else \
+		echo "cfn-lint not installed. Install with: pip install cfn-lint"; \
+		exit 1; \
+	fi
+
+validate-config:
+	@echo "Validating configuration..."
+	@python3 scripts/config_loader.py --config .qualys-scanner.yml 2>/dev/null || \
+		echo "No .qualys-scanner.yml found (using defaults)"
+
+# =============================================================================
+# Configuration Targets
+# =============================================================================
+
+config-init:
+	@if [ -f .qualys-scanner.yml ]; then \
+		echo "ERROR: .qualys-scanner.yml already exists"; \
+		echo "Remove it first or edit directly"; \
+		exit 1; \
+	fi
+	@cp .qualys-scanner.yml.example .qualys-scanner.yml
+	@echo "Created .qualys-scanner.yml from example"
+	@echo "Edit this file to customize your deployment settings"
+
+config-show:
+	@echo "Current configuration:"
+	@echo ""
+	@if [ -f .qualys-scanner.yml ]; then \
+		python3 scripts/config_loader.py; \
+	else \
+		echo "No .qualys-scanner.yml found. Using defaults:"; \
+		echo ""; \
+		python3 scripts/config_loader.py; \
+	fi

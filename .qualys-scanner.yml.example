@@ -1,0 +1,114 @@
+# Qualys Lambda Scanner Configuration
+# Copy this file to .qualys-scanner.yml and customize for your environment
+#
+# Environment variables always take precedence over this config file.
+# QUALYS_ACCESS_TOKEN must always be set as an environment variable (never in this file).
+
+version: "1.0"
+
+# Qualys Configuration
+qualys:
+  # Qualys platform/POD (US1, US2, EU1, GOV1, etc.)
+  # Can be overridden with QUALYS_POD environment variable
+  pod: "US2"
+
+# AWS Configuration
+aws:
+  # Default AWS region for deployment
+  # Can be overridden with AWS_REGION environment variable
+  default_region: "us-east-1"
+
+  # CloudFormation stack name prefix
+  stack_name: "qualys-lambda-scanner"
+
+# Deployment Configuration
+deployment:
+  # Deployment type: single-account, stackset, or hub-spoke
+  type: "single-account"
+
+  # Regions to deploy to (for multi-region deployments)
+  regions:
+    - us-east-1
+    # - us-west-2
+    # - eu-west-1
+
+  # StackSet-specific settings (only used when type: stackset)
+  stackset:
+    # Organization Unit IDs to deploy to
+    # Can be overridden with ORG_UNIT_IDS environment variable
+    org_unit_ids: []
+    # Auto-deploy to new accounts in OUs
+    auto_deployment: true
+    # Retain stacks when accounts leave OUs
+    retain_on_removal: false
+
+# Scanner Lambda Configuration
+scanner:
+  # Memory size in MB (512-10240)
+  memory_size: 2048
+
+  # Timeout in seconds (60-900)
+  timeout: 900
+
+  # Ephemeral storage in MB (512-10240)
+  ephemeral_storage: 2048
+
+  # Reserved concurrent executions (0 = no limit)
+  reserved_concurrency: 10
+
+  # Feature flags
+  enable_tagging: true           # Add QualysScan* tags to scanned Lambdas
+  enable_s3_results: true        # Store results in S3
+  enable_sns_notifications: true # Send SNS notifications
+  enable_scan_cache: true        # DynamoDB cache to prevent duplicate scans
+  enable_bulk_scan: true         # Deploy bulk scan Lambda
+
+  # Cache TTL in days (1-365)
+  cache_ttl_days: 30
+
+# Bulk Scan Configuration
+bulk_scan:
+  # Cron schedule for automatic bulk scans (empty = manual only)
+  # Example: "cron(0 2 ? * SUN *)" for weekly at 2 AM Sunday
+  schedule: ""
+
+  # Function name patterns to exclude from bulk scans
+  exclude_patterns:
+    - "qualys-lambda-scanner"
+    - "bulk-scan"
+
+  # Invocation delay between batches (milliseconds)
+  invocation_delay_ms: 100
+
+  # Maximum concurrent scanner invocations
+  max_workers: 10
+
+  # Functions per batch
+  batch_size: 100
+
+  # Default regions for bulk scan (if not specified in event)
+  default_regions:
+    - us-east-1
+
+# Lambda Layer Configuration
+layer:
+  # Layer name
+  name: "qscanner"
+
+  # Directory containing QScanner binary (optional, for custom builds)
+  # binaries_dir: "~/custom/binaries"
+
+# Testing Configuration (used by make test-* targets)
+testing:
+  smoke_test:
+    # Test Lambda function name
+    function_name: "qualys-scanner-test-target"
+    # Clean up test resources after smoke test
+    cleanup_after: true
+
+  integration:
+    # Skip cleanup for debugging
+    skip_cleanup: false
+    # Regions to run integration tests in
+    test_regions:
+      - us-east-1
