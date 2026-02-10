@@ -1,5 +1,6 @@
 .PHONY: help update-qscanner layer package deploy deploy-multi-region clean deploy-stackset deploy-hub deploy-spoke \
-       delete delete-hub delete-stackset delete-spoke-stackset \
+       deploy-spoke-minimal deploy-spoke-minimal-stackset deploy-org-forwarder \
+       delete delete-hub delete-stackset delete-spoke-stackset delete-org-forwarder \
        delete-bucket delete-buckets delete-artifacts-bucket delete-secret delete-layers \
        delete-dynamodb delete-dlq delete-sns delete-log-groups delete-alarms delete-eventbridge-rules delete-kms-key \
        clean-all clean-all-hub clean-all-stackset clean-dry-run clean-all-resources \
@@ -39,9 +40,15 @@ help:
 	@echo ""
 	@echo "=== Centralized Hub-Spoke Deployment ==="
 	@echo "  deploy-hub           - Deploy hub scanner in security account"
-	@echo "  deploy-spoke-stackset - Deploy spoke template via StackSet"
+	@echo "  deploy-spoke-stackset - Deploy spoke template via StackSet (creates CloudTrail)"
 	@echo "  delete-hub           - Delete hub stack"
 	@echo "  delete-spoke-stackset - Delete spoke StackSet"
+	@echo ""
+	@echo "=== Hub-Spoke with Org CloudTrail (no new CloudTrails) ==="
+	@echo "  deploy-org-forwarder - Deploy EventBridge forwarder in management account"
+	@echo "  deploy-spoke-minimal - Deploy minimal spoke (IAM role only) to single account"
+	@echo "  deploy-spoke-minimal-stackset - Deploy minimal spoke via StackSet"
+	@echo "  delete-org-forwarder - Delete org forwarder stack"
 	@echo ""
 	@echo "=== Build ==="
 	@echo "  update-qscanner      - Update qscanner.gz from downloaded Linux binary"
@@ -79,6 +86,9 @@ help:
 	@echo "  LAYER_NAME              - Lambda layer name (default: qscanner)"
 	@echo "  QSCANNER_BINARIES_DIR   - Directory with downloaded qscanner binaries"
 	@echo "                            (default: ~/git_base/infra/binaries)"
+	@echo "  HUB_ACCOUNT_ID          - Hub account ID (for org forwarder and minimal spoke)"
+	@echo "  EXTERNAL_ID             - External ID for cross-account role (auto-generated if not set)"
+	@echo "  REGIONS                 - Comma-separated regions for multi-region StackSet"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make deploy QUALYS_POD=US2 AWS_REGION=us-east-1"
@@ -442,6 +452,97 @@ delete-spoke-stackset:
 		--stack-set-name $(STACK_NAME)-spoke-stackset \
 		--region $(AWS_REGION)
 	@echo "Spoke StackSet deleted"
+
+
+HUB_ACCOUNT_ID ?=
+HUB_EVENT_BUS_NAME ?= $(STACK_NAME)-hub-central-bus
+
+deploy-org-forwarder:
+	@echo "Deploying org CloudTrail EventBridge forwarder..."
+	@if [ -z "$(HUB_ACCOUNT_ID)" ]; then \
+		echo "ERROR: HUB_ACCOUNT_ID required"; \
+		echo "Usage: make deploy-org-forwarder HUB_ACCOUNT_ID=123456789012"; \
+		exit 1; \
+	fi
+	aws cloudformation deploy \
+		--template-file cloudformation/org-cloudtrail-forwarder.yaml \
+		--stack-name $(STACK_NAME)-org-forwarder \
+		--parameter-overrides \
+			HubAccountId=$(HUB_ACCOUNT_ID) \
+			HubEventBusName=$(HUB_EVENT_BUS_NAME) \
+			HubRegion=$(AWS_REGION) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION)
+	@echo ""
+	@echo "Org forwarder deployed! Lambda events will now forward to hub."
+
+delete-org-forwarder:
+	@aws cloudformation delete-stack \
+		--stack-name $(STACK_NAME)-org-forwarder \
+		--region $(AWS_REGION)
+	@aws cloudformation wait stack-delete-complete \
+		--stack-name $(STACK_NAME)-org-forwarder \
+		--region $(AWS_REGION)
+	@echo "Org forwarder deleted"
+
+deploy-spoke-minimal:
+	@echo "Deploying minimal spoke (IAM role only, no CloudTrail)..."
+	@if [ -z "$(HUB_ACCOUNT_ID)" ]; then \
+		echo "ERROR: HUB_ACCOUNT_ID required"; \
+		echo "Usage: make deploy-spoke-minimal HUB_ACCOUNT_ID=123456789012 EXTERNAL_ID=your-id"; \
+		exit 1; \
+	fi
+	aws cloudformation deploy \
+		--template-file cloudformation/centralized-spoke-minimal.yaml \
+		--stack-name $(STACK_NAME)-spoke \
+		--parameter-overrides \
+			SecurityAccountId=$(HUB_ACCOUNT_ID) \
+			ScannerExternalId=$(EXTERNAL_ID) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION)
+	@echo ""
+	@echo "Minimal spoke deployed!"
+
+deploy-spoke-minimal-stackset:
+	@echo "Deploying minimal spoke StackSet (IAM role only, no CloudTrail)..."
+	@if [ -z "$(ORG_UNIT_IDS)" ]; then \
+		echo "ERROR: ORG_UNIT_IDS required"; \
+		exit 1; \
+	fi
+	@if [ -z "$(HUB_ACCOUNT_ID)" ]; then \
+		echo "ERROR: HUB_ACCOUNT_ID required"; \
+		exit 1; \
+	fi
+	@aws cloudformation create-stack-set \
+		--stack-set-name $(STACK_NAME)-spoke-minimal-stackset \
+		--template-body file://cloudformation/centralized-spoke-minimal.yaml \
+		--parameters \
+			ParameterKey=SecurityAccountId,ParameterValue=$(HUB_ACCOUNT_ID) \
+			ParameterKey=ScannerExternalId,ParameterValue=$(EXTERNAL_ID) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--permission-model SERVICE_MANAGED \
+		--auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false \
+		--region $(AWS_REGION) 2>/dev/null || \
+		aws cloudformation update-stack-set \
+			--stack-set-name $(STACK_NAME)-spoke-minimal-stackset \
+			--template-body file://cloudformation/centralized-spoke-minimal.yaml \
+			--parameters \
+				ParameterKey=SecurityAccountId,ParameterValue=$(HUB_ACCOUNT_ID) \
+				ParameterKey=ScannerExternalId,ParameterValue=$(EXTERNAL_ID) \
+			--capabilities CAPABILITY_NAMED_IAM \
+			--region $(AWS_REGION)
+	@echo "Creating stack instances in OUs: $(ORG_UNIT_IDS)..."
+	@for region in $$(echo "$(REGIONS)" | tr ',' ' '); do \
+		echo "Creating instances in $$region..."; \
+		aws cloudformation create-stack-instances \
+			--stack-set-name $(STACK_NAME)-spoke-minimal-stackset \
+			--deployment-targets OrganizationalUnitIds=$(ORG_UNIT_IDS) \
+			--regions $$region \
+			--operation-preferences FailureTolerancePercentage=10,MaxConcurrentPercentage=25 \
+			--region $(AWS_REGION); \
+	done
+	@echo ""
+	@echo "Minimal spoke StackSet deployment initiated!"
 
 delete-hub:
 	@aws cloudformation delete-stack \

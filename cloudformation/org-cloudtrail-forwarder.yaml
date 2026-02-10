@@ -1,0 +1,125 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Qualys Lambda Scanner - Org CloudTrail EventBridge Forwarder (Management Account)'
+
+Parameters:
+  HubAccountId:
+    Type: String
+    Description: 'AWS Account ID where the scanner hub is deployed'
+
+  HubEventBusName:
+    Type: String
+    Description: 'Name of the central EventBridge bus in the hub account'
+    Default: 'qualys-lambda-scanner-hub-central-bus'
+
+  HubRegion:
+    Type: String
+    Description: 'Region where the hub is deployed'
+    Default: 'us-east-1'
+
+Resources:
+  EventBridgeForwardRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 'qualys-lambda-scanner-org-forwarder-role'
+      Description: 'Role for EventBridge to forward Lambda events to scanner hub'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PutEventsToHub
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !Sub 'arn:aws:events:${HubRegion}:${HubAccountId}:event-bus/${HubEventBusName}'
+      Tags:
+        - Key: Name
+          Value: 'qualys-lambda-scanner-org-forwarder-role'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  LambdaCreateEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'qualys-lambda-scanner-org-create'
+      Description: 'Forward Lambda create events from org CloudTrail to scanner hub'
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.lambda
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - lambda.amazonaws.com
+          eventName:
+            - CreateFunction20150331
+      Targets:
+        - Arn: !Sub 'arn:aws:events:${HubRegion}:${HubAccountId}:event-bus/${HubEventBusName}'
+          Id: HubEventBus
+          RoleArn: !GetAtt EventBridgeForwardRole.Arn
+
+  LambdaUpdateCodeEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'qualys-lambda-scanner-org-update-code'
+      Description: 'Forward Lambda update code events from org CloudTrail to scanner hub'
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.lambda
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - lambda.amazonaws.com
+          eventName:
+            - UpdateFunctionCode20150331v2
+      Targets:
+        - Arn: !Sub 'arn:aws:events:${HubRegion}:${HubAccountId}:event-bus/${HubEventBusName}'
+          Id: HubEventBus
+          RoleArn: !GetAtt EventBridgeForwardRole.Arn
+
+  LambdaUpdateConfigEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: 'qualys-lambda-scanner-org-update-config'
+      Description: 'Forward Lambda update config events from org CloudTrail to scanner hub'
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.lambda
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - lambda.amazonaws.com
+          eventName:
+            - UpdateFunctionConfiguration20150331v2
+      Targets:
+        - Arn: !Sub 'arn:aws:events:${HubRegion}:${HubAccountId}:event-bus/${HubEventBusName}'
+          Id: HubEventBus
+          RoleArn: !GetAtt EventBridgeForwardRole.Arn
+
+Outputs:
+  ForwarderRoleArn:
+    Description: 'ARN of the EventBridge forwarding role'
+    Value: !GetAtt EventBridgeForwardRole.Arn
+
+  CreateEventRuleArn:
+    Description: 'ARN of the Lambda create event forwarding rule'
+    Value: !GetAtt LambdaCreateEventRule.Arn
+
+  UpdateCodeEventRuleArn:
+    Description: 'ARN of the Lambda update code event forwarding rule'
+    Value: !GetAtt LambdaUpdateCodeEventRule.Arn
+
+  UpdateConfigEventRuleArn:
+    Description: 'ARN of the Lambda update config event forwarding rule'
+    Value: !GetAtt LambdaUpdateConfigEventRule.Arn

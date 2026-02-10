@@ -1,0 +1,86 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Qualys Lambda Scanner - Minimal Spoke (uses existing Org CloudTrail)'
+
+Parameters:
+  SecurityAccountId:
+    Type: String
+    Description: 'AWS Account ID of the central security account (hub)'
+
+  ScannerExternalId:
+    Type: String
+    Description: 'External ID for cross-account role assumption (must match hub deployment)'
+    MinLength: 16
+    MaxLength: 128
+    NoEcho: true
+
+Resources:
+  SpokeAssumeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: 'qualys-lambda-scanner-spoke-role'
+      Description: 'Role assumed by central scanner Lambda to scan Lambdas in this account'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${SecurityAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ScannerExternalId
+      Policies:
+        - PolicyName: LambdaAndECRAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: LambdaList
+                Effect: Allow
+                Action:
+                  - lambda:ListFunctions
+                Resource: '*'
+
+              - Sid: LambdaRead
+                Effect: Allow
+                Action:
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                Resource: !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:*'
+
+              - Sid: LambdaTag
+                Effect: Allow
+                Action:
+                  - lambda:TagResource
+                Resource: !Sub 'arn:aws:lambda:*:${AWS::AccountId}:function:*'
+                Condition:
+                  'ForAllValues:StringLike':
+                    'aws:TagKeys':
+                      - 'QualysScan*'
+
+              - Sid: ECRAuthToken
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+
+              - Sid: ECRRepositoryAccess
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:DescribeImages
+                Resource: !Sub 'arn:aws:ecr:*:${AWS::AccountId}:repository/*'
+
+      Tags:
+        - Key: Name
+          Value: 'qualys-lambda-scanner-spoke-role'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  SpokeRoleArn:
+    Description: 'ARN of the role for central scanner to assume'
+    Value: !GetAtt SpokeAssumeRole.Arn
+    Export:
+      Name: 'QualysScannerSpokeRoleArn'
