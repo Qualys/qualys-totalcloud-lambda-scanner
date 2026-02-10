@@ -118,13 +118,13 @@ make deploy-spoke-minimal-stackset \
 
 After deployment, run bulk scans from the hub account to scan all existing Lambda functions.
 
+> **Note:** All commands below are AWS CloudShell compatible. They use `jq` for JSON filtering instead of JMESPath backticks which can cause issues in some shells.
+
 ### Scan All Accounts
 
 ```bash
-# Get all account IDs in your org
-ACCOUNT_IDS=$(aws organizations list-accounts \
-  --query 'Accounts[?Status==`ACTIVE`].Id' \
-  --output json)
+# Get all account IDs in your org (CloudShell compatible)
+ACCOUNT_IDS=$(aws organizations list-accounts --output json | jq '[.Accounts[] | select(.Status=="ACTIVE") | .Id]')
 
 echo $ACCOUNT_IDS
 
@@ -150,11 +150,7 @@ See what would be scanned without actually scanning:
 ```bash
 aws lambda invoke \
   --function-name qualys-lambda-scanner-hub-bulk-scan \
-  --payload "{
-    \"account_ids\": $ACCOUNT_IDS,
-    \"regions\": [\"us-east-1\", \"us-west-2\", \"eu-west-1\"],
-    \"dry_run\": true
-  }" \
+  --payload "{\"account_ids\": $ACCOUNT_IDS, \"regions\": [\"us-east-1\", \"us-west-2\", \"eu-west-1\"], \"dry_run\": true}" \
   --cli-binary-format raw-in-base64-out \
   output.json
 
@@ -176,10 +172,12 @@ aws lambda invoke \
 
 ### Quick One-Liner (All Accounts, All Regions)
 
+CloudShell compatible:
+
 ```bash
 aws lambda invoke \
   --function-name qualys-lambda-scanner-hub-bulk-scan \
-  --payload "{\"account_ids\": $(aws organizations list-accounts --query 'Accounts[?Status==\`ACTIVE\`].Id' --output json), \"regions\": [\"us-east-1\",\"us-west-2\",\"eu-west-1\"]}" \
+  --payload "{\"account_ids\": $(aws organizations list-accounts --output json | jq -c '[.Accounts[] | select(.Status==\"ACTIVE\") | .Id]'), \"regions\": [\"us-east-1\",\"us-west-2\",\"eu-west-1\"]}" \
   --cli-binary-format raw-in-base64-out \
   /dev/stdout | jq
 ```
