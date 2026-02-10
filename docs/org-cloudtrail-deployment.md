@@ -103,7 +103,7 @@ make deploy-spoke-minimal-stackset \
   ORG_UNIT_IDS=$ORG_ROOT \
   HUB_ACCOUNT_ID=<hub-account-id-from-step-1> \
   EXTERNAL_ID=<external-id-from-step-1> \
-  REGIONS=us-east-1,us-west-2,eu-west-1
+  REGIONS=us-east-1,us-west-2,ca-central-1
 ```
 
 ## Quick Reference
@@ -124,23 +124,22 @@ After deployment, run bulk scans from the hub account to scan all existing Lambd
 
 ```bash
 # Get all account IDs in your org (CloudShell compatible)
-ACCOUNT_IDS=$(aws organizations list-accounts --output json | jq '[.Accounts[] | select(.Status=="ACTIVE") | .Id]')
+ACCOUNT_IDS=$(aws organizations list-accounts --output json | jq -c '[.Accounts[] | select(.Status=="ACTIVE") | .Id]')
 
 echo $ACCOUNT_IDS
 
-# Invoke bulk scan for all accounts
+# Create payload file
+printf '{"account_ids": %s, "regions": ["us-east-1", "us-west-2", "ca-central-1"], "dry_run": false}' "$ACCOUNT_IDS" > /tmp/payload.json
+
+# Invoke bulk scan async (avoids timeout)
 aws lambda invoke \
   --function-name qualys-lambda-scanner-hub-bulk-scan \
-  --payload "{
-    \"account_ids\": $ACCOUNT_IDS,
-    \"regions\": [\"us-east-1\", \"us-west-2\", \"eu-west-1\"],
-    \"dry_run\": false
-  }" \
-  --cli-binary-format raw-in-base64-out \
-  output.json
+  --invocation-type Event \
+  --payload file:///tmp/payload.json \
+  /tmp/output.json && echo "Bulk scan started in background"
 
-# Check results
-cat output.json | jq
+# Watch progress
+aws logs tail /aws/lambda/qualys-lambda-scanner-hub-bulk-scan --follow
 ```
 
 ### Dry Run First (Recommended)
@@ -148,38 +147,54 @@ cat output.json | jq
 See what would be scanned without actually scanning:
 
 ```bash
+# Create dry run payload
+printf '{"account_ids": %s, "regions": ["us-east-1", "us-west-2", "ca-central-1"], "dry_run": true}' "$ACCOUNT_IDS" > /tmp/payload.json
+
+# Invoke async
 aws lambda invoke \
   --function-name qualys-lambda-scanner-hub-bulk-scan \
-  --payload "{\"account_ids\": $ACCOUNT_IDS, \"regions\": [\"us-east-1\", \"us-west-2\", \"eu-west-1\"], \"dry_run\": true}" \
-  --cli-binary-format raw-in-base64-out \
-  output.json
+  --invocation-type Event \
+  --payload file:///tmp/payload.json \
+  /tmp/output.json && echo "Dry run started"
 
-cat output.json | jq '.body | {accounts: .accounts_processed, functions: .total_functions}'
+# Watch logs for results
+aws logs tail /aws/lambda/qualys-lambda-scanner-hub-bulk-scan --follow
 ```
 
 ### Scan Single Account
 
 ```bash
+# Create payload for single account (replace with real account ID)
+echo '{"account_ids": ["123456789012"], "regions": ["us-east-1"], "dry_run": false}' > /tmp/payload.json
+
+# Invoke async
 aws lambda invoke \
   --function-name qualys-lambda-scanner-hub-bulk-scan \
-  --payload '{
-    "account_ids": ["123456789012"],
-    "regions": ["us-east-1"]
-  }' \
-  --cli-binary-format raw-in-base64-out \
-  output.json
+  --invocation-type Event \
+  --payload file:///tmp/payload.json \
+  /tmp/output.json && echo "Scan started"
+
+# Watch logs
+aws logs tail /aws/lambda/qualys-lambda-scanner-hub-bulk-scan --follow
 ```
 
 ### Quick One-Liner (All Accounts, All Regions)
 
-CloudShell compatible:
+CloudShell compatible - uses async invocation to avoid timeout:
 
 ```bash
 aws lambda invoke \
   --function-name qualys-lambda-scanner-hub-bulk-scan \
-  --payload "{\"account_ids\": $(aws organizations list-accounts --output json | jq -c '[.Accounts[] | select(.Status==\"ACTIVE\") | .Id]'), \"regions\": [\"us-east-1\",\"us-west-2\",\"eu-west-1\"]}" \
+  --invocation-type Event \
+  --payload "{\"account_ids\": $(aws organizations list-accounts --output json | jq -c '[.Accounts[] | select(.Status==\"ACTIVE\") | .Id]'), \"regions\": [\"us-east-1\",\"us-west-2\",\"ca-central-1\"]}" \
   --cli-binary-format raw-in-base64-out \
-  /dev/stdout | jq
+  /tmp/output.json && echo "Bulk scan started in background"
+```
+
+Then watch the logs:
+
+```bash
+aws logs tail /aws/lambda/qualys-lambda-scanner-hub-bulk-scan --follow
 ```
 
 ### Watch Progress
@@ -218,7 +233,7 @@ aws logs tail /aws/lambda/qualys-lambda-scanner-hub-bulk-scan --follow
 aws cloudformation delete-stack-instances \
   --stack-set-name qualys-lambda-scanner-spoke-minimal-stackset \
   --deployment-targets OrganizationalUnitIds=r-xxxx \
-  --regions us-east-1 us-west-2 eu-west-1 \
+  --regions us-east-1 us-west-2 ca-central-1 \
   --no-retain-stacks
 
 # Wait for instances to delete, then:
