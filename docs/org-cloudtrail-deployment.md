@@ -183,12 +183,33 @@ aws logs tail /aws/lambda/qualys-lambda-scanner-hub-bulk-scan --follow
 CloudShell compatible - uses async invocation to avoid timeout:
 
 ```bash
+# Step 1: Get account IDs
+ACCOUNTS=$(aws organizations list-accounts --output json | jq -c '[.Accounts[] | select(.Status=="ACTIVE") | .Id]')
+
+# Step 2: Invoke with the variable
 aws lambda invoke \
   --function-name qualys-lambda-scanner-hub-bulk-scan \
   --invocation-type Event \
-  --payload "{\"account_ids\": $(aws organizations list-accounts --output json | jq -c '[.Accounts[] | select(.Status==\"ACTIVE\") | .Id]'), \"regions\": [\"us-east-1\",\"us-west-2\",\"ca-central-1\"]}" \
+  --payload "{\"account_ids\": $ACCOUNTS, \"regions\": [\"us-east-1\",\"us-west-2\",\"ca-central-1\"]}" \
   --cli-binary-format raw-in-base64-out \
-  /tmp/output.json && echo "Bulk scan started in background"
+  /tmp/output.json && echo "Bulk scan started"
+```
+
+Or use a file to avoid all escaping issues:
+
+```bash
+# Step 1: Get accounts and build payload file
+aws organizations list-accounts --output json | jq '{account_ids: [.Accounts[] | select(.Status=="ACTIVE") | .Id], regions: ["us-east-1","us-west-2","ca-central-1"]}' > /tmp/payload.json
+
+# Step 2: Verify
+cat /tmp/payload.json
+
+# Step 3: Invoke
+aws lambda invoke \
+  --function-name qualys-lambda-scanner-hub-bulk-scan \
+  --invocation-type Event \
+  --payload file:///tmp/payload.json \
+  /tmp/output.json && echo "Bulk scan started"
 ```
 
 Then watch the logs:
