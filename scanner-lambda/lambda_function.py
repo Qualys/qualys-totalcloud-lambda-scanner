@@ -279,13 +279,23 @@ def _get_lambda_function(client, function_arn: str) -> Dict:
 def get_target_lambda_client(cross_account_role: Optional[str] = None, region_name: Optional[str] = None) -> Any:
     if cross_account_role:
         if not validate_role_arn(cross_account_role):
-            raise ValueError(f"Invalid cross-account role ARN format")
+            raise ValueError(f"Invalid cross-account role ARN format: {cross_account_role}")
 
-        assumed_role = _assume_role(
-            cross_account_role,
-            'QScannerSession',
-            SCANNER_EXTERNAL_ID
-        )
+        logger.info(f"Assuming role: {cross_account_role} region={region_name} "
+                     f"external_id_set={bool(SCANNER_EXTERNAL_ID)}")
+        try:
+            assumed_role = _assume_role(
+                cross_account_role,
+                'QScannerSession',
+                SCANNER_EXTERNAL_ID
+            )
+        except Exception as e:
+            logger.error(f"Failed to assume role {cross_account_role}: {type(e).__name__}: {e}")
+            raise
+
+        assumed_account = assumed_role['AssumedRoleUser']['Arn'].split(':')[4]
+        logger.info(f"Successfully assumed role in account {assumed_account} "
+                     f"session={assumed_role['AssumedRoleUser']['Arn']}")
 
         client_kwargs = {
             'aws_access_key_id': assumed_role['Credentials']['AccessKeyId'],
@@ -296,6 +306,7 @@ def get_target_lambda_client(cross_account_role: Optional[str] = None, region_na
             client_kwargs['region_name'] = region_name
         return boto3.client('lambda', **client_kwargs)
     else:
+        logger.info(f"Using local Lambda client (no cross-account role) region={region_name}")
         if region_name:
             return boto3.client('lambda', region_name=region_name)
         return lambda_client
