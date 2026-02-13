@@ -276,7 +276,7 @@ def _get_lambda_function(client, function_arn: str) -> Dict:
     return client.get_function(FunctionName=function_arn)
 
 
-def get_target_lambda_client(cross_account_role: Optional[str] = None) -> Any:
+def get_target_lambda_client(cross_account_role: Optional[str] = None, region_name: Optional[str] = None) -> Any:
     if cross_account_role:
         if not validate_role_arn(cross_account_role):
             raise ValueError(f"Invalid cross-account role ARN format")
@@ -287,13 +287,17 @@ def get_target_lambda_client(cross_account_role: Optional[str] = None) -> Any:
             SCANNER_EXTERNAL_ID
         )
 
-        return boto3.client(
-            'lambda',
-            aws_access_key_id=assumed_role['Credentials']['AccessKeyId'],
-            aws_secret_access_key=assumed_role['Credentials']['SecretAccessKey'],
-            aws_session_token=assumed_role['Credentials']['SessionToken']
-        )
+        client_kwargs = {
+            'aws_access_key_id': assumed_role['Credentials']['AccessKeyId'],
+            'aws_secret_access_key': assumed_role['Credentials']['SecretAccessKey'],
+            'aws_session_token': assumed_role['Credentials']['SessionToken']
+        }
+        if region_name:
+            client_kwargs['region_name'] = region_name
+        return boto3.client('lambda', **client_kwargs)
     else:
+        if region_name:
+            return boto3.client('lambda', region_name=region_name)
         return lambda_client
 
 
@@ -522,13 +526,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         qualys_creds = get_qualys_credentials()
 
+        arn_parts = function_arn.split(':')
+        target_region = arn_parts[3] if len(arn_parts) >= 4 and re.match(r'^[a-z]{2}-[a-z]+-\d+$', arn_parts[3]) else None
+
         cross_account_role_arn = None
         if CROSS_ACCOUNT_ROLE_NAME:
             target_account_id = event.get('account', detail.get('userIdentity', {}).get('accountId'))
             if target_account_id:
                 cross_account_role_arn = f"arn:aws:iam::{target_account_id}:role/{CROSS_ACCOUNT_ROLE_NAME}"
 
-        target_lambda_client = get_target_lambda_client(cross_account_role_arn)
+        target_lambda_client = get_target_lambda_client(cross_account_role_arn, region_name=target_region)
         lambda_details = get_lambda_details(function_arn, target_lambda_client)
 
         code_sha256 = lambda_details.get('code_sha256')
@@ -542,7 +549,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 })
             }
 
-        aws_region = event.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
+        aws_region = target_region or event.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
 
         scan_start_time = time.time()
         scan_results = run_qscanner(lambda_details, qualys_creds, aws_region)

@@ -129,7 +129,7 @@ def list_all_functions(client: boto3.client, exclude_patterns: list) -> List[Dic
     return functions
 
 
-def invoke_scanner(func: Dict[str, Any], source_account: str) -> Tuple[bool, str]:
+def invoke_scanner(func: Dict[str, Any], source_account: str, region: str = '') -> Tuple[bool, str]:
     function_name = func.get('FunctionName', 'unknown')
 
     if not SCANNER_FUNCTION_NAME:
@@ -139,6 +139,7 @@ def invoke_scanner(func: Dict[str, Any], source_account: str) -> Tuple[bool, str
     scan_event = {
         'source': 'qualys.bulk-scan',
         'detail-type': 'Bulk Scan Request',
+        'region': region or CURRENT_REGION,
         'detail': {
             'eventName': 'BulkScanRequest',
             'eventSource': 'lambda.amazonaws.com',
@@ -170,13 +171,13 @@ def invoke_scanner(func: Dict[str, Any], source_account: str) -> Tuple[bool, str
         return False, function_name
 
 
-def invoke_batch_parallel(functions: List[Dict[str, Any]], account_id: str) -> Tuple[int, int]:
+def invoke_batch_parallel(functions: List[Dict[str, Any]], account_id: str, region: str = '') -> Tuple[int, int]:
     invoked = 0
     failed = 0
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_func = {
-            executor.submit(invoke_scanner, func, account_id): func
+            executor.submit(invoke_scanner, func, account_id, region): func
             for func in functions
         }
 
@@ -243,7 +244,7 @@ def process_region(account_id: str, region: str, current_account: str,
 
             logger.info(f"Processing batch {batch_num}/{total_batches} in {region} ({len(batch)} functions)")
 
-            batch_invoked, batch_failed = invoke_batch_parallel(batch, account_id)
+            batch_invoked, batch_failed = invoke_batch_parallel(batch, account_id, region)
             invoked += batch_invoked
             failed += batch_failed
 
