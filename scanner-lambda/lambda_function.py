@@ -276,7 +276,7 @@ def _get_lambda_function(client, function_arn: str) -> Dict:
     return client.get_function(FunctionName=function_arn)
 
 
-def get_target_lambda_client(cross_account_role: Optional[str] = None, region_name: Optional[str] = None) -> Any:
+def get_target_lambda_client(cross_account_role: Optional[str] = None, region_name: Optional[str] = None) -> tuple:
     if cross_account_role:
         if not validate_role_arn(cross_account_role):
             raise ValueError(f"Invalid cross-account role ARN format: {cross_account_role}")
@@ -297,19 +297,20 @@ def get_target_lambda_client(cross_account_role: Optional[str] = None, region_na
         logger.info(f"Successfully assumed role in account {assumed_account} "
                      f"session={assumed_role['AssumedRoleUser']['Arn']}")
 
-        client_kwargs = {
+        credentials = {
             'aws_access_key_id': assumed_role['Credentials']['AccessKeyId'],
             'aws_secret_access_key': assumed_role['Credentials']['SecretAccessKey'],
             'aws_session_token': assumed_role['Credentials']['SessionToken']
         }
+        client_kwargs = dict(credentials)
         if region_name:
             client_kwargs['region_name'] = region_name
-        return boto3.client('lambda', **client_kwargs)
+        return boto3.client('lambda', **client_kwargs), credentials
     else:
         logger.info(f"Using local Lambda client (no cross-account role) region={region_name}")
         if region_name:
-            return boto3.client('lambda', region_name=region_name)
-        return lambda_client
+            return boto3.client('lambda', region_name=region_name), None
+        return lambda_client, None
 
 
 def get_lambda_details(function_arn: str, target_lambda_client: Optional[Any] = None) -> Dict[str, Any]:
@@ -331,7 +332,7 @@ def get_lambda_details(function_arn: str, target_lambda_client: Optional[Any] = 
     }
 
 
-def run_qscanner(lambda_details: Dict[str, Any], qualys_creds: Dict[str, str], aws_region: str) -> Dict[str, Any]:
+def run_qscanner(lambda_details: Dict[str, Any], qualys_creds: Dict[str, str], aws_region: str, assumed_credentials: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     package_type = lambda_details.get('package_type', 'Zip')
     function_arn = lambda_details['function_arn']
     function_name = lambda_details.get('function_name', 'unknown')
@@ -361,6 +362,12 @@ def run_qscanner(lambda_details: Dict[str, Any], qualys_creds: Dict[str, str], a
 
     env = os.environ.copy()
     env['AWS_REGION'] = aws_region
+
+    if assumed_credentials:
+        env['AWS_ACCESS_KEY_ID'] = assumed_credentials['aws_access_key_id']
+        env['AWS_SECRET_ACCESS_KEY'] = assumed_credentials['aws_secret_access_key']
+        env['AWS_SESSION_TOKEN'] = assumed_credentials['aws_session_token']
+        logger.info(f"Passing assumed role credentials to QScanner for {function_name}")
 
     if 'registry_username' in qualys_creds:
         env['QSCANNER_REGISTRY_USERNAME'] = qualys_creds['registry_username']
@@ -580,7 +587,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 cross_account_role_arn = f"arn:aws:iam::{target_account_id}:role/{CROSS_ACCOUNT_ROLE_NAME}"
                 logger.info(f"Using cross-account role for account {target_account_id}")
 
-        target_lambda_client = get_target_lambda_client(cross_account_role_arn, region_name=target_region)
+        target_lambda_client, assumed_credentials = get_target_lambda_client(cross_account_role_arn, region_name=target_region)
         lambda_details = get_lambda_details(function_arn, target_lambda_client)
 
         code_sha256 = lambda_details.get('code_sha256')
@@ -597,7 +604,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         aws_region = target_region or event.get('region', os.environ.get('AWS_REGION', 'us-east-1'))
 
         scan_start_time = time.time()
-        scan_results = run_qscanner(lambda_details, qualys_creds, aws_region)
+        scan_results = run_qscanner(lambda_details, qualys_creds, aws_region, assumed_credentials)
         scan_duration = time.time() - scan_start_time
 
         update_scan_cache(function_arn, lambda_details, scan_results)
