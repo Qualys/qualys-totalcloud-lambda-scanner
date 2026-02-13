@@ -323,6 +323,7 @@ def get_lambda_details(function_arn: str, target_lambda_client: Optional[Any] = 
 def run_qscanner(lambda_details: Dict[str, Any], qualys_creds: Dict[str, str], aws_region: str) -> Dict[str, Any]:
     package_type = lambda_details.get('package_type', 'Zip')
     function_arn = lambda_details['function_arn']
+    function_name = lambda_details.get('function_name', 'unknown')
     image_uri = lambda_details.get('image_uri')
 
     base_cmd = [
@@ -336,8 +337,16 @@ def run_qscanner(lambda_details: Dict[str, Any], qualys_creds: Dict[str, str], a
 
     if package_type == 'Image' and image_uri:
         cmd = base_cmd + ['image', image_uri]
+        scan_target = image_uri
     else:
         cmd = base_cmd + ['lambda', function_arn]
+        scan_target = function_arn
+
+    logger.info(f"Starting QScanner: function={function_name} arn={function_arn} "
+                f"region={aws_region} package_type={package_type} "
+                f"runtime={lambda_details.get('runtime', 'N/A')} "
+                f"code_size={lambda_details.get('code_size', 'N/A')} "
+                f"target={scan_target}")
 
     env = os.environ.copy()
     env['AWS_REGION'] = aws_region
@@ -362,11 +371,27 @@ def run_qscanner(lambda_details: Dict[str, Any], qualys_creds: Dict[str, str], a
 
         if result.returncode != 0:
             if result.returncode in PARTIAL_SUCCESS_EXIT_CODES:
-                logger.warning(f"QScanner partial success: exit code {result.returncode}")
+                logger.warning(f"QScanner partial success: function={function_name} "
+                               f"arn={function_arn} exit_code={result.returncode} "
+                               f"region={aws_region}")
+                if result.stderr:
+                    logger.warning(f"QScanner partial stderr: {sanitize_log_output(result.stderr[:2000])}")
             else:
-                logger.error(f"QScanner failed: exit code {result.returncode}")
-                logger.error(f"stderr: {sanitize_log_output(result.stderr)}")
-                raise ScanException("QScanner execution failed")
+                logger.error(f"QScanner failed: function={function_name} "
+                             f"arn={function_arn} exit_code={result.returncode} "
+                             f"region={aws_region} package_type={package_type} "
+                             f"runtime={lambda_details.get('runtime', 'N/A')}")
+                if result.stdout:
+                    logger.error(f"QScanner stdout: {sanitize_log_output(result.stdout[:2000])}")
+                if result.stderr:
+                    logger.error(f"QScanner stderr: {sanitize_log_output(result.stderr[:2000])}")
+                raise ScanException(
+                    f"QScanner execution failed: function={function_name} "
+                    f"exit_code={result.returncode} region={aws_region}"
+                )
+
+        logger.info(f"QScanner completed: function={function_name} "
+                     f"exit_code={result.returncode} region={aws_region}")
 
         scan_results = {}
         output_dir = '/tmp/qscanner-output'
@@ -376,8 +401,10 @@ def run_qscanner(lambda_details: Dict[str, Any], qualys_creds: Dict[str, str], a
             if scan_result_files:
                 with open(scan_result_files[0], 'r') as f:
                     scan_results = json.load(f)
+            else:
+                logger.warning(f"No scan result files found in {output_dir} for {function_name}")
         except Exception as e:
-            logger.warning(f"Failed to read scan results: {e}")
+            logger.warning(f"Failed to read scan results for {function_name}: {e}")
 
         return {
             'success': True,
@@ -389,7 +416,9 @@ def run_qscanner(lambda_details: Dict[str, Any], qualys_creds: Dict[str, str], a
         }
 
     except subprocess.TimeoutExpired:
-        raise ScanException(f"Scan timeout after {SCAN_TIMEOUT} seconds")
+        logger.error(f"QScanner timeout: function={function_name} arn={function_arn} "
+                     f"region={aws_region} timeout={SCAN_TIMEOUT}s")
+        raise ScanException(f"Scan timeout after {SCAN_TIMEOUT}s: function={function_name}")
 
 
 def tag_lambda_function(
@@ -528,12 +557,17 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         arn_parts = function_arn.split(':')
         target_region = arn_parts[3] if len(arn_parts) >= 4 and re.match(r'^[a-z]{2}-[a-z]+-\d+$', arn_parts[3]) else None
+        target_account_id = event.get('account', detail.get('userIdentity', {}).get('accountId'))
+
+        logger.info(f"Processing scan: function_arn={function_arn} "
+                     f"account={target_account_id} region={target_region} "
+                     f"source={event.get('source', 'unknown')}")
 
         cross_account_role_arn = None
         if CROSS_ACCOUNT_ROLE_NAME:
-            target_account_id = event.get('account', detail.get('userIdentity', {}).get('accountId'))
             if target_account_id:
                 cross_account_role_arn = f"arn:aws:iam::{target_account_id}:role/{CROSS_ACCOUNT_ROLE_NAME}"
+                logger.info(f"Using cross-account role for account {target_account_id}")
 
         target_lambda_client = get_target_lambda_client(cross_account_role_arn, region_name=target_region)
         lambda_details = get_lambda_details(function_arn, target_lambda_client)
@@ -586,21 +620,23 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         }
 
     except ScanException as e:
-        logger.error(f"Scan failed: {e}")
+        logger.error(f"Scan failed: {e} request_id={context.aws_request_id}")
         return {
             'statusCode': 500,
             'body': json.dumps({
                 'message': 'Scan failed',
+                'error': str(e),
                 'request_id': context.aws_request_id
             })
         }
 
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.error(f"Error: {e} request_id={context.aws_request_id}", exc_info=True)
         return {
             'statusCode': 500,
             'body': json.dumps({
                 'message': 'Internal error',
+                'error': str(e),
                 'request_id': context.aws_request_id
             })
         }
