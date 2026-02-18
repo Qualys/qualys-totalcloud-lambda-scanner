@@ -247,6 +247,110 @@ aws logs tail /aws/lambda/qualys-lambda-scanner-hub-bulk-scan --follow
 6. Scanner downloads and scans the Lambda code
 7. Results stored in S3, DynamoDB cache updated, SNS notification sent
 
+## Troubleshooting
+
+### Bulk Scan CLI Timeout
+
+**Symptom:** `ReadTimeoutError` when invoking the bulk scan Lambda from the CLI.
+
+**Cause:** The default `aws lambda invoke` uses synchronous (`RequestResponse`) invocation. The bulk scan Lambda can run for up to 15 minutes, but the CLI has a 60-second read timeout.
+
+**Fix:** Always use `--invocation-type Event` for async invocation. Monitor progress via CloudWatch Logs instead.
+
+### QScanner Cross-Account Failures (exit code 10, "no resource-based policy")
+
+**Symptom:** QScanner fails with exit code 10 and errors like "no resource-based policy allows the lambda:GetFunction action" when scanning functions in spoke accounts.
+
+**Cause:** The scanner Lambda assumes the spoke role and uses those credentials for the Python boto3 client. However, QScanner runs as a subprocess and inherits the Lambda's own execution role credentials from the environment, not the assumed spoke credentials. QScanner then attempts cross-account GetFunction calls with the wrong identity.
+
+**Fix (applied in commit `6597bb5`):** The assumed spoke role credentials are now passed to the QScanner subprocess via `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` environment variables. This ensures QScanner operates with the spoke role's permissions.
+
+**Verification:** After deploying the fix, scanner logs should show:
+```
+Passing assumed role credentials to QScanner for <function-name>
+QScanner completed: function=<function-name> exit_code=0
+```
+
+### Cross-Region Scan Failures ("not reachable in this region")
+
+**Symptom:** Scans fail for Lambda functions in regions other than the hub's region (e.g., hub is in us-east-1 but functions exist in us-west-2).
+
+**Cause:** The scanner Lambda client and QScanner subprocess were not being configured with the target function's region. Both defaulted to the hub's own region.
+
+**Fix (applied in commit `20359fe`):** The region is now extracted from the function ARN and passed to both the boto3 Lambda client and the QScanner `AWS_REGION` environment variable.
+
+### Debugging Scan Failures
+
+Check scanner logs with filtering:
+
+```bash
+# All errors
+aws logs tail /aws/lambda/qualys-lambda-scanner-hub-scanner --since 1h \
+  --filter-pattern "ERROR"
+
+# Specific account
+aws logs tail /aws/lambda/qualys-lambda-scanner-hub-scanner --since 1h \
+  --filter-pattern "123456789012"
+
+# Assume role issues
+aws logs tail /aws/lambda/qualys-lambda-scanner-hub-scanner --since 1h \
+  --filter-pattern "Failed to assume"
+
+# Successful scans
+aws logs tail /aws/lambda/qualys-lambda-scanner-hub-scanner --since 1h \
+  --filter-pattern "Scan completed"
+```
+
+### Validating Cross-Account Role Setup
+
+Before running bulk scans, verify the spoke role can be assumed from the hub account:
+
+```bash
+aws sts assume-role \
+  --role-arn arn:aws:iam::SPOKE_ACCOUNT_ID:role/qualys-lambda-scanner-spoke-role \
+  --role-session-name TestSession \
+  --external-id YOUR_EXTERNAL_ID \
+  --query 'AssumedRoleUser.Arn' --output text
+```
+
+Check that both the scanner and bulk scan Lambdas have the correct environment variables:
+
+```bash
+aws lambda get-function-configuration \
+  --function-name qualys-lambda-scanner-hub-scanner \
+  --query 'Environment.Variables.{ROLE: CROSS_ACCOUNT_ROLE_NAME, EXT_ID: SCANNER_EXTERNAL_ID}' \
+  --output table
+```
+
+Verify the spoke role's trust policy references the correct hub account ID and external ID:
+
+```bash
+# Run in a spoke account
+aws iam get-role \
+  --role-name qualys-lambda-scanner-spoke-role \
+  --query 'Role.AssumeRolePolicyDocument'
+```
+
+### Redeploying Code Fixes
+
+After pulling code updates, redeploy the scanner Lambda:
+
+```bash
+git pull
+make package
+aws lambda update-function-code \
+  --function-name qualys-lambda-scanner-hub-scanner \
+  --zip-file fileb://build/scanner-function.zip
+```
+
+To also update the bulk scan Lambda:
+
+```bash
+aws lambda update-function-code \
+  --function-name qualys-lambda-scanner-hub-bulk-scan \
+  --zip-file fileb://build/bulk-scan.zip
+```
+
 ## Cleanup
 
 ```bash
