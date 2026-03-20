@@ -4,11 +4,42 @@ Description: 'Qualys Lambda Scanner - Single Account'
 Parameters:
   QualysSecretArn:
     Type: String
-    Description: 'ARN of existing Secrets Manager secret containing Qualys credentials'
+    Description: 'ARN of existing Secrets Manager secret (leave empty to create one from QualysPod/QualysAccessToken)'
+    Default: ''
 
   QScannerLayerArn:
     Type: String
-    Description: 'ARN of the Lambda Layer containing QScanner binary'
+    Description: 'ARN of existing Lambda Layer containing QScanner binary (leave empty to create from S3)'
+    Default: ''
+
+  QualysPod:
+    Type: String
+    Description: 'Qualys POD (required when QualysSecretArn is not provided)'
+    Default: ''
+    AllowedValues:
+      - ''
+      - US1
+      - US2
+      - US3
+      - US4
+      - EU1
+      - EU2
+      - IN1
+      - CA1
+      - AE1
+      - UK1
+      - AU1
+
+  QualysAccessToken:
+    Type: String
+    Description: 'Qualys access token (required when QualysSecretArn is not provided)'
+    Default: ''
+    NoEcho: true
+
+  QScannerLayerKey:
+    Type: String
+    Description: 'S3 key for QScanner layer zip (used when QScannerLayerArn is not provided)'
+    Default: 'qscanner-layer.zip'
 
   LambdaCodeBucket:
     Type: String
@@ -121,7 +152,23 @@ Parameters:
     Description: 'Cron schedule for periodic bulk scans (empty = manual only). Example: cron(0 2 ? * SUN *) for weekly Sunday 2am'
     Default: ''
 
+Rules:
+  SecretParametersRequired:
+    RuleCondition: !Equals [!Ref QualysSecretArn, '']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref QualysPod, '']]
+        AssertDescription: 'QualysPod is required when QualysSecretArn is not provided'
+      - Assert: !Not [!Equals [!Ref QualysAccessToken, '']]
+        AssertDescription: 'QualysAccessToken is required when QualysSecretArn is not provided'
+  LayerBucketRequired:
+    RuleCondition: !Equals [!Ref QScannerLayerArn, '']
+    Assertions:
+      - Assert: !Not [!Equals [!Ref LambdaCodeBucket, '']]
+        AssertDescription: 'LambdaCodeBucket is required when QScannerLayerArn is not provided'
+
 Conditions:
+  CreateSecret: !Equals [!Ref QualysSecretArn, '']
+  CreateLayer: !Equals [!Ref QScannerLayerArn, '']
   CreateS3Bucket: !Equals [!Ref EnableS3Results, 'true']
   CreateSNSTopic: !Equals [!Ref EnableSNSNotifications, 'true']
   CreateScanCache: !Equals [!Ref EnableScanCache, 'true']
@@ -200,6 +247,39 @@ Resources:
     Properties:
       AliasName: !Sub 'alias/${AWS::StackName}-scanner'
       TargetKeyId: !Ref ScannerKMSKey
+
+  QualysCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: CreateSecret
+    Properties:
+      Name: !Sub '${AWS::StackName}-qualys-credentials'
+      Description: 'Qualys credentials for Lambda scanner'
+      KmsKeyId: !Ref ScannerKMSKey
+      SecretString: !Sub |
+        {
+          "qualys_pod": "${QualysPod}",
+          "qualys_access_token": "${QualysAccessToken}"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-qualys-credentials'
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  QScannerLayer:
+    Type: AWS::Lambda::LayerVersion
+    Condition: CreateLayer
+    Properties:
+      LayerName: !Sub '${AWS::StackName}-qscanner'
+      Description: 'QScanner binary for Lambda vulnerability scanning'
+      Content:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref QScannerLayerKey
+      CompatibleRuntimes:
+        - python3.11
+        - python3.12
+      CompatibleArchitectures:
+        - x86_64
 
   AccessLogsBucket:
     Type: AWS::S3::Bucket
@@ -395,7 +475,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !Ref QualysSecretArn
+                Resource: !If [CreateSecret, !Ref QualysCredentialsSecret, !Ref QualysSecretArn]
               - Sid: SQSDeadLetterQueue
                 Effect: Allow
                 Action:
@@ -474,14 +554,14 @@ Resources:
       EphemeralStorage:
         Size: !Ref ScannerEphemeralStorage
       Layers:
-        - !Ref QScannerLayerArn
+        - !If [CreateLayer, !Ref QScannerLayer, !Ref QScannerLayerArn]
       DeadLetterConfig:
         TargetArn: !GetAtt ScannerDeadLetterQueue.Arn
       TracingConfig:
         Mode: Active
       Environment:
         Variables:
-          QUALYS_SECRET_ARN: !Ref QualysSecretArn
+          QUALYS_SECRET_ARN: !If [CreateSecret, !Ref QualysCredentialsSecret, !Ref QualysSecretArn]
           RESULTS_S3_BUCKET: !If [CreateS3Bucket, !Ref ScanResultsBucket, '']
           SNS_TOPIC_ARN: !If [CreateSNSTopic, !Ref ScanNotificationsTopic, '']
           SCAN_CACHE_TABLE: !If [CreateScanCache, !Ref ScanCacheTable, '']
@@ -947,3 +1027,15 @@ Outputs:
     Value: !Ref AccessLogsBucket
     Export:
       Name: !Sub '${AWS::StackName}-AccessLogsBucket'
+
+  QualysSecretArnOutput:
+    Description: 'ARN of the Qualys credentials secret (created or provided)'
+    Value: !If [CreateSecret, !Ref QualysCredentialsSecret, !Ref QualysSecretArn]
+    Export:
+      Name: !Sub '${AWS::StackName}-QualysSecretArn'
+
+  QScannerLayerArnOutput:
+    Description: 'ARN of the QScanner Lambda Layer (created or provided)'
+    Value: !If [CreateLayer, !Ref QScannerLayer, !Ref QScannerLayerArn]
+    Export:
+      Name: !Sub '${AWS::StackName}-QScannerLayerArn'

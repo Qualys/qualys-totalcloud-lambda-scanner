@@ -1,4 +1,4 @@
-.PHONY: help update-qscanner layer package deploy deploy-multi-region clean deploy-stackset deploy-hub deploy-spoke \
+.PHONY: help update-qscanner layer package deploy quickstart deploy-multi-region clean deploy-stackset deploy-hub deploy-spoke \
        deploy-spoke-minimal deploy-spoke-minimal-stackset deploy-org-forwarder \
        delete delete-hub delete-stackset delete-spoke-stackset delete-org-forwarder \
        delete-bucket delete-buckets delete-artifacts-bucket delete-secret delete-layers \
@@ -29,6 +29,7 @@ help:
 	@echo "Qualys Lambda Scanner - Makefile"
 	@echo ""
 	@echo "=== Single Account Deployment ==="
+	@echo "  quickstart           - One-command deploy (creates secret + layer in CFN)"
 	@echo "  deploy               - Deploy scanner to single region"
 	@echo "  deploy-multi-region  - Deploy scanner to multiple regions"
 	@echo "  update-function      - Update Lambda function code only"
@@ -235,6 +236,32 @@ deploy: publish-layer upload-function create-secret
 			LambdaCodeBucket=$(S3_BUCKET) \
 			LambdaCodeKey=scanner-function.zip \
 			BulkScanCodeKey=bulk-scan.zip \
+			EnableTagging=$(TAG) \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(AWS_REGION)
+	@echo "Deployment complete!"
+	@aws cloudformation describe-stacks \
+		--stack-name $(STACK_NAME) \
+		--query 'Stacks[0].Outputs' \
+		--region $(AWS_REGION)
+
+quickstart: layer package create-bucket
+	@# Upload all artifacts to S3
+	@aws s3 cp build/qscanner-layer.zip s3://$(S3_BUCKET)/qscanner-layer.zip
+	@aws s3 cp build/scanner-function.zip s3://$(S3_BUCKET)/scanner-function.zip
+	@aws s3 cp build/bulk-scan.zip s3://$(S3_BUCKET)/bulk-scan.zip
+	@# Deploy CFN (secret + layer created inline)
+	@aws cloudformation deploy \
+		--template-file cloudformation/single-account-native.yaml \
+		--stack-name $(STACK_NAME) \
+		--parameter-overrides \
+			QualysPod=$(QUALYS_POD) \
+			QualysAccessToken=$(QUALYS_ACCESS_TOKEN) \
+			LambdaCodeBucket=$(S3_BUCKET) \
+			LambdaCodeKey=scanner-function.zip \
+			BulkScanCodeKey=bulk-scan.zip \
+			QScannerLayerKey=qscanner-layer.zip \
+			EnableBulkScan=true \
 			EnableTagging=$(TAG) \
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(AWS_REGION)
